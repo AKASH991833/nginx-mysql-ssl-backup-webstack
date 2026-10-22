@@ -8,7 +8,7 @@ jobs:
       - name: Install nginx, MariaDB, logrotate, shellcheck
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq nginx mariadb-server rsync logrotate shellcheck curl openssl
+          sudo apt-get install -y -qq nginx mariadb-server openssl diffutils rsync logrotate shellcheck curl openssl
           sudo systemctl stop nginx mariadb || true      # the tests start their own private instances
       - name: ShellCheck
         run: shellcheck -S error -x wsk tests/run.sh
@@ -32,7 +32,7 @@ jobs:
     container: rockylinux:9
     steps:
       - name: Install packages (dnf)
-        run: dnf install -y -q git nginx mariadb-server mariadb rsync logrotate openssl hostname procps-ng findutils gawk which iproute
+        run: dnf install -y -q git nginx mariadb-server mariadb openssl diffutils rsync logrotate openssl hostname procps-ng findutils gawk which iproute
       - uses: actions/checkout@v4
       - name: Integration tests on Rocky 9
         run: tests/run.sh
