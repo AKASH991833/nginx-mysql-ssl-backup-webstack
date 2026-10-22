@@ -1,13 +1,18 @@
 # Nginx + MariaDB/MySQL + SSL + Verified Backups Web Stack (`wsk`)
 
 [![CI](https://github.com/AKASH991833/nginx-mysql-ssl-backup-webstack/actions/workflows/ci.yml/badge.svg)](https://github.com/AKASH991833/nginx-mysql-ssl-backup-webstack/actions/workflows/ci.yml)
-![bash](https://img.shields.io/badge/language-bash-4EAA25) ![nginx](https://img.shields.io/badge/nginx-1.18%2B-009639) ![license](https://img.shields.io/badge/license-MIT-blue)
+[![release](https://img.shields.io/github/v/release/AKASH991833/nginx-mysql-ssl-backup-webstack)](https://github.com/AKASH991833/nginx-mysql-ssl-backup-webstack/releases)
+![bash](https://img.shields.io/badge/language-bash-4EAA25) ![tested on](https://img.shields.io/badge/tested%20on-ubuntu%20%2B%20rocky%209%20%2B%20docker-blue) ![nginx](https://img.shields.io/badge/nginx-1.18%2B-009639) ![license](https://img.shields.io/badge/license-MIT-blue)
 
 A production-style web server stack you can build in one command and *understand* from zero: **Nginx** (hardened, HTTPS, security headers, rate limiting) + **MariaDB/MySQL** (least-privilege user per site) + **TLS** (Let's Encrypt or self-signed lab certs) + **automatic backups that are proven restorable** + **log rotation and log analysis** + an end-to-end **health check**.
 
 Everything is one readable Bash tool: `wsk`.
 
 ![headers](docs/img/headers.png)
+
+**20-second demo** (real CI output: init-site, HTTPS answers, backup proven by restore):
+
+![demo](docs/img/demo.gif)
 
 ## What makes this different
 
@@ -22,7 +27,9 @@ Everything is one readable Bash tool: `wsk`.
 | **Certificate watchdog** | `wsk certs` lists days left; exit code 1 (renew soon) and 2 (critical) so cron/monitoring can alert. |
 | **Tested for real** | The test-suite starts a real nginx and a real MariaDB (no root, no Docker) and checks 34 behaviours. |
 
-## Quick start
+> Preparing for an interview? Read [INTERVIEW.md](INTERVIEW.md) (60-second pitch, design choices, 10 Q&A).
+
+## Quick start (60 seconds to a running HTTPS site, on a fresh Ubuntu VM)
 
 ```bash
 git clone https://github.com/AKASH991833/nginx-mysql-ssl-backup-webstack.git
@@ -108,16 +115,16 @@ Logs grow forever and fill the disk. `wsk logrotate` installs a policy: weekly, 
 | `wsk health [--json]` | full health check |
 | `wsk timers [--apply]` | cron schedule (02:30 backup, Sunday verify, daily certs, 5-min health) |
 
-Environment variables (`WSK_*`) let you relocate every path, so you can also run it unprivileged for testing (that is how the tests work). Optional container lab: `examples/docker-compose.yml`.
+Environment variables (`WSK_*`) let you relocate every path, so you can also run it unprivileged for testing (that is how the tests work). Container lab: `examples/` (docker compose) - built and verified on every push by the `compose-lab` CI job; see `examples/README.md`.
 
 ## Honest test report
 - `tests/run.sh`: **34 checks pass** against a *real* nginx 1.18 and *real* MariaDB 10.6 started as a normal user on ports 18080/18443: site creation, `nginx -t`, redirect 301, HTTPS 200, security headers, hidden version, `.env` blocked (403), TLS 1.1 refused, DB user isolation, backup contents, restore into scratch DB, corrupted backup detected, restore of dropped table and deleted files, GFS retention + hard links, rsync off-site identity, certificate expiry exit codes, log analysis, `logrotate -d` accepts the policy, cron file, health fails when nginx is down.
 - ShellCheck clean (`-S error`).
 - **Not run in the author's sandbox** (needs root/systemd/internet): `wsk install`, real Let's Encrypt issuance, listening on ports 80/443, `systemctl`. The `real-server` job in GitHub Actions installs everything as root on a clean Ubuntu VM and runs `init-site`, `backup`, `verify`, `health`, `certs`, `logrotate` (see the CI badge).
-- `docker-compose.yml` is an untested lab sample.
+- The docker-compose lab is exercised end-to-end by the `compose-lab` CI job on every push: containers start, HTTP 301 / HTTPS 200 / headers / dotfile-403 are checked, a backup is taken and **restored into a scratch database with row-count verification**.
 - Let's Encrypt mode shells out to `certbot` and was not exercised.
 - **CI result (Oct 22, 2026):** `lint-and-test` and `real-server` are green. The real-server run found and fixed a real bug (a second `gzip on` clashed with the distro nginx.conf) and a logrotate check that was too strict on the CI runner.
-- Tested on Ubuntu 22.04 packages; dnf/RHEL path is written but unverified.
+- The `rocky` CI job runs the same full integration suite (real nginx + real MariaDB) on Rocky Linux 9 with dnf packages.
 
 ## Security notes
 Never commit `/etc/wsk` (it holds DB credentials). Keep `wsk-backups` off the web root. Use SSH-key login for `WSK_RSYNC_TARGET`. Test `wsk restore` on a staging machine before you need it.

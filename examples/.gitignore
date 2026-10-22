@@ -1,0 +1,5 @@
+# lab secrets and generated files - never commit these
+db_password.txt
+db_root_password.txt
+certs/
+backups/

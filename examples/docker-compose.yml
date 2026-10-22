@@ -1,16 +1,19 @@
-# Lab version: the same stack in containers (nginx + MariaDB + a backup sidecar).
-# UNTESTED in the author's sandbox (no Docker there) - the host version (./wsk) is the tested one.
+# Lab version of the wsk stack in containers: nginx (TLS, security headers) + MariaDB
+# + a backup sidecar whose dumps are proven restorable.
+# This lab is exercised end-to-end on every push by the "compose-lab" job in
+# .github/workflows/ci.yml (start, HTTP/TLS checks, backup, real restore into a scratch DB).
+# How to run it yourself: see examples/README.md
 services:
   db:
     image: mariadb:10.11
     environment:
-      MARIADB_RANDOM_ROOT_PASSWORD: "1"
+      MARIADB_ROOT_PASSWORD_FILE: /run/secrets/db_root_password
       MARIADB_DATABASE: shop
       MARIADB_USER: shop_app
       MARIADB_PASSWORD_FILE: /run/secrets/db_password
-    secrets: [db_password]
+    secrets: [db_password, db_root_password]
     volumes: [dbdata:/var/lib/mysql]
-    healthcheck: { test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"], interval: 10s, retries: 10 }
+    healthcheck: { test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"], interval: 5s, retries: 24 }
   web:
     image: nginx:stable-alpine
     ports: ["8080:80", "8443:443"]
@@ -21,12 +24,15 @@ services:
     depends_on: { db: { condition: service_healthy } }
   backup:
     image: mariadb:10.11
-    entrypoint: ["/bin/sh", "-c", "while true; do mariadb-dump -h db -u shop_app -p\"$$(cat /run/secrets/db_password)\" --single-transaction shop | gzip > /backups/shop-$$(date +%F).sql.gz; find /backups -mtime +7 -delete; sleep 86400; done"]
+    # one backup at start, then one every 24h; run "docker compose exec backup /backup.sh" any time
+    entrypoint: ["/bin/sh", "-c", "/backup.sh && while true; do sleep 86400; /backup.sh; done"]
     secrets: [db_password]
-    volumes: [./backups:/backups]
-    depends_on: [db]
+    volumes: [./backups:/backups, ./backup.sh:/backup.sh:ro]
+    depends_on: { db: { condition: service_healthy } }
 secrets:
-  db_password:
-    file: ./db_password.txt        # create it yourself: openssl rand -base64 24 > db_password.txt
+  db_password:       # create it: openssl rand -base64 24 > db_password.txt
+    file: ./db_password.txt
+  db_root_password:  # create it: openssl rand -base64 24 > db_root_password.txt
+    file: ./db_root_password.txt
 volumes:
   dbdata:

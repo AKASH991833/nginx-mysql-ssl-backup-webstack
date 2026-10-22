@@ -26,3 +26,49 @@ jobs:
       - run: sudo ./wsk health
       - run: sudo ./wsk certs
       - run: sudo ./wsk logrotate
+  rocky:
+    # The same unprivileged integration suite on a RHEL-family distro (Rocky 9, dnf packages).
+    runs-on: ubuntu-latest
+    container: rockylinux:9
+    steps:
+      - name: Install packages (dnf)
+        run: dnf install -y -q git nginx mariadb-server mariadb rsync logrotate openssl curl hostname procps-ng findutils gawk which iproute
+      - uses: actions/checkout@v4
+      - name: Integration tests on Rocky 9
+        run: tests/run.sh
+  compose-lab:
+    # The container lab is real: build it, probe HTTP/TLS/headers, write rows, run the
+    # backup sidecar, then restore the dump into a scratch database and count the rows.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start the lab
+        run: |
+          cd examples
+          openssl rand -base64 24 > db_password.txt
+          openssl rand -base64 24 > db_root_password.txt
+          ./gen-certs.sh
+          docker compose up -d --wait
+      - name: HTTP/TLS behaviour
+        run: |
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/)" = 301
+          test "$(curl -sk -o /dev/null -w '%{http_code}' https://localhost:8443/)" = 200
+          curl -skI https://localhost:8443/ | grep -qi 'x-content-type-options: nosniff'
+          ! curl -skI https://localhost:8443/ | grep -qi 'nginx/[0-9]'
+          test "$(curl -sk -o /dev/null -w '%{http_code}' https://localhost:8443/.env)" = 403
+      - name: Backup, then prove the dump restores
+        run: |
+          cd examples
+          docker compose exec -T db sh -c 'mariadb -uroot -p"$(cat /run/secrets/db_root_password)" -e "CREATE TABLE IF NOT EXISTS shop.visits(path VARCHAR(50)); INSERT INTO shop.visits VALUES ('"'"'/a'"'"'),('"'"'/b'"'"'),('"'"'/c'"'"');"'
+          docker compose exec -T backup /backup.sh
+          docker compose exec -T db sh -c 'mariadb -uroot -p"$(cat /run/secrets/db_root_password)" -e "DROP TABLE shop.visits;"'
+          f=$(ls -t backups/shop-*.sql.gz | head -1)
+          docker compose exec -T db sh -c 'mariadb -uroot -p"$(cat /run/secrets/db_root_password)" -e "CREATE DATABASE restorecheck"'
+          zcat "$f" | docker compose exec -T db sh -c 'mariadb -uroot -p"$(cat /run/secrets/db_root_password)" restorecheck'
+          n=$(docker compose exec -T db sh -c 'mariadb -uroot -p"$(cat /run/secrets/db_root_password)" -N -e "SELECT COUNT(*) FROM restorecheck.visits"')
+          echo "restored rows: $n"
+          test "$n" = 3
+          docker compose exec -T db sh -c 'mariadb -uroot -p"$(cat /run/secrets/db_root_password)" -e "DROP DATABASE restorecheck"'
+      - name: Tear down
+        if: always()
+        run: cd examples && docker compose down -v
