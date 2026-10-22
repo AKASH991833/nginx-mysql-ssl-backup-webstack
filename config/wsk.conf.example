@@ -1,0 +1,8 @@
+# /etc/wsk/wsk.conf  (plain bash KEY=VALUE)
+WSK_DAILY_KEEP=7
+WSK_WEEKLY_KEEP=4
+WSK_MONTHLY_KEEP=6
+# off-site copy after every backup (ssh key login recommended). Local path also works.
+#WSK_RSYNC_TARGET="backup@storage.example.com:/srv/backups/web01"
+WSK_CERT_WARN_DAYS=21
+WSK_CERT_CRIT_DAYS=7

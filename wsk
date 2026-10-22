@@ -1,0 +1,345 @@
+#!/usr/bin/env bash
+# wsk - Nginx + MariaDB/MySQL + TLS + verified backups + log rotation, in one tool
+set -uo pipefail
+WSK_VERSION="1.0.0"
+
+# ---------- configuration (all overridable by environment, so tests can run unprivileged) ----------
+P=${WSK_PREFIX:-}                                   # path prefix; empty on a real server
+ETC=${WSK_ETC:-$P/etc/wsk}
+NGINX_CONFD=${WSK_NGINX_CONFD:-$P/etc/nginx/conf.d}
+WEBROOT_BASE=${WSK_WEBROOT_BASE:-$P/var/www}
+BACKUP_DIR=${WSK_BACKUP_DIR:-$P/var/backups/wsk}
+LOG_DIR=${WSK_LOG_DIR:-$P/var/log/nginx}
+NGINX_BIN=${WSK_NGINX_BIN:-nginx}
+NGINX_CONF=${WSK_NGINX_CONF:-}                      # main nginx.conf (only needed when not the default one)
+MYSQL=${WSK_MYSQL:-mysql}                           # e.g. "mariadb -S /run/mysqld/mysqld.sock -uroot"
+MYSQLDUMP=${WSK_MYSQLDUMP:-mysqldump}
+DAILY_KEEP=${WSK_DAILY_KEEP:-7}; WEEKLY_KEEP=${WSK_WEEKLY_KEEP:-4}; MONTHLY_KEEP=${WSK_MONTHLY_KEEP:-6}
+RSYNC_TARGET=${WSK_RSYNC_TARGET:-}                  # e.g. backup@host:/srv/backups  or a local path
+CERT_WARN_DAYS=${WSK_CERT_WARN_DAYS:-21}; CERT_CRIT_DAYS=${WSK_CERT_CRIT_DAYS:-7}
+[[ -r $ETC/wsk.conf ]] && source "$ETC/wsk.conf"
+
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then R=$'\e[31m'; G=$'\e[32m'; Y=$'\e[33m'; B=$'\e[1m'; D=$'\e[2m'; N=$'\e[0m'; else R=""; G=""; Y=""; B=""; D=""; N=""; fi
+die()  { printf '%swsk: error:%s %s\n' "$R" "$N" "$*" >&2; exit 2; }
+note() { printf '%s\n' "$*"; }
+ok()   { printf ' %s[ OK ]%s %s\n' "$G" "$N" "$*"; }
+bad()  { printf ' %s[FAIL]%s %s\n' "$R" "$N" "$*"; }
+wrn()  { printf ' %s[WARN]%s %s\n' "$Y" "$N" "$*"; }
+nginx_t() { if [[ -n $NGINX_CONF ]]; then "$NGINX_BIN" -t -c "$NGINX_CONF" 2>&1; else "$NGINX_BIN" -t 2>&1; fi; }
+sql()  { $MYSQL "$@"; }            # intentionally unquoted: MYSQL may hold several words
+site_env() { echo "$ETC/sites/$1.env"; }
+rand_pw() { openssl rand -base64 33 | tr -dc 'A-Za-z0-9' | head -c 24; }
+
+# ---------- install -------------------------------------------------------------------------
+cmd_install() {
+  [[ $EUID -eq 0 ]] || die "install needs root (sudo)"
+  if command -v apt-get >/dev/null; then
+    apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nginx mariadb-server openssl certbot rsync logrotate curl
+  elif command -v dnf >/dev/null; then
+    dnf install -y nginx mariadb-server openssl certbot rsync logrotate curl
+  else die "unsupported package manager"; fi
+  systemctl enable --now nginx mariadb 2>/dev/null || true
+  mkdir -p "$ETC/sites" "$ETC/certs" "$BACKUP_DIR"; chmod 700 "$ETC" "$BACKUP_DIR"
+  note "installed. Next: wsk init-site example.com --self-signed"
+}
+
+# ---------- global nginx snippet + site -------------------------------------------------------
+write_global_snippet() {
+  mkdir -p "$NGINX_CONFD"
+  cat > "$NGINX_CONFD/00-wsk-global.conf" <<'G'
+# managed by wsk - global hardening for every site
+server_tokens off;                      # do not advertise the nginx version
+gzip on; gzip_types text/plain text/css application/json application/javascript image/svg+xml;
+client_max_body_size 10m;
+log_format wsk '$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent "$http_referer" "$http_user_agent" rt=$request_time';
+G
+}
+
+cmd_init_site() {
+  local domain=${1:-}; shift || true
+  [[ $domain =~ ^[a-zA-Z0-9.-]+$ ]] || die "usage: wsk init-site DOMAIN [--db NAME] [--self-signed | --letsencrypt EMAIL] [--http-port N] [--https-port N] [--skip-db]"
+  local db=${domain//[.-]/_}; local mode=self-signed email="" hp=80 sp=443 skipdb=0
+  while (( $# )); do case $1 in
+    --db) db=$2; shift 2;; --self-signed) mode=self-signed; shift;; --letsencrypt) mode=letsencrypt; email=$2; shift 2;;
+    --http-port) hp=$2; shift 2;; --https-port) sp=$2; shift 2;; --skip-db) skipdb=1; shift;; *) die "unknown option $1";; esac; done
+  local root="$WEBROOT_BASE/$domain/public" cdir="$ETC/certs/$domain"
+  mkdir -p "$root" "$cdir" "$ETC/sites" "$LOG_DIR"; chmod 700 "$ETC"
+  write_global_snippet
+
+  # 1. sample page
+  [[ -e $root/index.html ]] || cat > "$root/index.html" <<H
+<!doctype html><title>$domain</title><h1>$domain is live</h1><p>Served by nginx, configured by wsk.</p>
+H
+
+  # 2. certificate
+  if [[ $mode == self-signed ]]; then
+    [[ -s $cdir/fullchain.pem ]] || openssl req -x509 -newkey rsa:2048 -nodes -days 90 -keyout "$cdir/privkey.pem" -out "$cdir/fullchain.pem" \
+        -subj "/CN=$domain" -addext "subjectAltName=DNS:$domain" 2>/dev/null
+    chmod 600 "$cdir/privkey.pem"
+    ok "self-signed certificate for $domain (90 days) - browsers will warn: it is for labs only"
+  else
+    certbot certonly --webroot -w "$root" -d "$domain" -m "$email" --agree-tos --non-interactive || die "certbot failed (is DNS pointing here and port 80 open?)"
+    ln -sfn "/etc/letsencrypt/live/$domain/fullchain.pem" "$cdir/fullchain.pem"; ln -sfn "/etc/letsencrypt/live/$domain/privkey.pem" "$cdir/privkey.pem"
+    ok "Let's Encrypt certificate issued"
+  fi
+
+  # 3. nginx vhost
+  local redir_port=""; [[ $sp != 443 ]] && redir_port=":$sp"
+  local hsts=""; [[ $mode == letsencrypt ]] && hsts='add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;'
+  cat > "$NGINX_CONFD/$domain.conf" <<V
+# managed by wsk - $domain
+limit_req_zone \$binary_remote_addr zone=${db}_rl:10m rate=10r/s;
+
+server {
+    listen $hp;
+    server_name $domain;
+    location /.well-known/acme-challenge/ { root $root; }
+    location / { return 301 https://\$host$redir_port\$request_uri; }
+}
+
+server {
+    listen $sp ssl;
+    server_name $domain;
+    root $root;
+    index index.html;
+
+    ssl_certificate     $cdir/fullchain.pem;
+    ssl_certificate_key $cdir/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:SSL_${db}:10m;
+    ssl_session_timeout 1d;
+    ssl_session_tickets off;
+
+    $hsts
+    add_header X-Content-Type-Options nosniff always;
+    add_header X-Frame-Options SAMEORIGIN always;
+    add_header Referrer-Policy strict-origin-when-cross-origin always;
+    add_header Content-Security-Policy "default-src 'self'" always;
+    add_header Permissions-Policy "geolocation=(), camera=(), microphone=()" always;
+
+    access_log $LOG_DIR/$domain.access.log wsk;
+    error_log  $LOG_DIR/$domain.error.log warn;
+
+    location / { limit_req zone=${db}_rl burst=20 nodelay; try_files \$uri \$uri/ =404; }
+    location ~ /\.(?!well-known) { deny all; }            # .git, .env, .htaccess ...
+    location ~* \.(sql|bak|old|swp)$ { deny all; }        # leftovers
+}
+V
+
+  # 4. database + least-privilege user
+  local dbpass=""
+  if (( ! skipdb )); then
+    dbpass=$(rand_pw)
+    sql -e "CREATE DATABASE IF NOT EXISTS \`$db\` CHARACTER SET utf8mb4;
+            CREATE USER IF NOT EXISTS '${db}_app'@'localhost' IDENTIFIED BY '$dbpass';
+            ALTER USER '${db}_app'@'localhost' IDENTIFIED BY '$dbpass';
+            GRANT SELECT,INSERT,UPDATE,DELETE,CREATE,INDEX,ALTER ON \`$db\`.* TO '${db}_app'@'localhost'; FLUSH PRIVILEGES;" || die "database setup failed"
+    sql -e "CREATE TABLE IF NOT EXISTS \`$db\`.visits (id INT AUTO_INCREMENT PRIMARY KEY, path VARCHAR(200), at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);" 
+    umask 077; printf '[client]\nuser=%s_app\npassword=%s\ndatabase=%s\n' "$db" "$dbpass" "$db" > "$ETC/sites/$domain.my.cnf"; umask 022
+    ok "database '$db' + user '${db}_app' (only that database). Credentials: $ETC/sites/$domain.my.cnf (mode 600)"
+  fi
+  printf 'DOMAIN=%s\nDB=%s\nWEBROOT=%s\nHTTP_PORT=%s\nHTTPS_PORT=%s\nCERT_MODE=%s\n' "$domain" "$db" "$root" "$hp" "$sp" "$mode" > "$(site_env "$domain")"
+  local out; if out=$(nginx_t); then ok "nginx config test passed"; else bad "nginx -t failed"; echo "$out"; rm -f "$NGINX_CONFD/$domain.conf"; exit 1; fi
+  note "Reload nginx to go live:  sudo systemctl reload nginx"
+}
+
+# ---------- backups ---------------------------------------------------------------------------
+_sites() { local f; for f in "$ETC"/sites/*.env; do [[ -e $f ]] && basename "$f" .env; done; }
+_rowcounts() { # db -> "table<TAB>rows" using exact COUNT(*)
+  local t; for t in $(sql -N -e "SHOW TABLES FROM \`$1\`"); do printf '%s\t%s\n' "$t" "$(sql -N -e "SELECT COUNT(*) FROM \`$1\`.\`$t\`")"; done
+}
+retention() { # dir keep
+  local d=$1 k=$2; [[ -d $d ]] || return 0
+  local n=0 x; for x in $(ls -1 "$d" | sort -r); do n=$((n+1)); (( n > k )) && { rm -rf "${d:?}/$x"; note "  pruned $d/$x"; }; done
+}
+cmd_backup() {
+  local stamp; stamp=$(date +%F_%H%M%S); local dest="$BACKUP_DIR/daily/$stamp" s
+  mkdir -p "$dest"; chmod 700 "$BACKUP_DIR" "$dest"
+  local sites; sites=$(_sites); [[ -n $sites ]] || die "no sites registered (run: wsk init-site)"
+  for s in $sites; do
+    # shellcheck disable=SC1090
+    ( source "$(site_env "$s")"
+      $MYSQLDUMP --single-transaction --routines --triggers --events "$DB" | gzip -9 > "$dest/$s.db.sql.gz" || exit 1
+      tar -czf "$dest/$s.files.tar.gz" -C "$(dirname "$WEBROOT")" "$(basename "$WEBROOT")" -C "$ETC/.." "$(basename "$ETC")/sites/$s.env" 2>/dev/null \
+        || tar -czf "$dest/$s.files.tar.gz" -C "$(dirname "$WEBROOT")" "$(basename "$WEBROOT")"
+      cp "$NGINX_CONFD/$s.conf" "$dest/$s.nginx.conf" 2>/dev/null || true
+      _rowcounts "$DB" > "$dest/$s.rowcounts.tsv" ) || { rm -rf "$dest"; die "backup of $s failed"; }
+  done
+  ( cd "$dest" && sha256sum ./*.gz ./*.tsv > SHA256SUMS )
+  printf '{"created":"%s","host":"%s","sites":"%s","size_bytes":%s}\n' "$(date -u +%FT%TZ)" "${WSK_HOSTNAME:-$(hostname)}" "$(echo $sites)" "$(du -sb "$dest" | cut -f1)" > "$dest/manifest.json"
+  ok "backup created: $dest ($(du -sh "$dest" | cut -f1))"
+  # grandfather-father-son promotion (hard links: no extra disk space)
+  local force=${WSK_FORCE_PROMOTE:-}
+  if [[ $(date +%u) == 7 || $force == *weekly* ]]; then mkdir -p "$BACKUP_DIR/weekly"; cp -al "$dest" "$BACKUP_DIR/weekly/$stamp"; note "  promoted to weekly"; fi
+  if [[ $(date +%d) == 01 || $force == *monthly* ]]; then mkdir -p "$BACKUP_DIR/monthly"; cp -al "$dest" "$BACKUP_DIR/monthly/$stamp"; note "  promoted to monthly"; fi
+  retention "$BACKUP_DIR/daily" "$DAILY_KEEP"; retention "$BACKUP_DIR/weekly" "$WEEKLY_KEEP"; retention "$BACKUP_DIR/monthly" "$MONTHLY_KEEP"
+  if [[ -n $RSYNC_TARGET ]]; then
+    rsync -a --delete "$BACKUP_DIR/" "$RSYNC_TARGET/" && ok "synced off-site: $RSYNC_TARGET" || bad "rsync to $RSYNC_TARGET failed"
+  fi
+  date +%s > "$ETC/last_backup"
+}
+
+_latest() { ls -1d "$BACKUP_DIR"/daily/*/ 2>/dev/null | sort | tail -1 | sed 's#/$##'; }
+
+# restore the dump into a scratch database and compare row counts with what we saw at backup time
+cmd_verify() {
+  local dir=${1:-latest}; [[ $dir == latest ]] && dir=$(_latest); [[ -d $dir ]] || die "no backup found"
+  note "verifying $dir"
+  local fail=0 s
+  if ( cd "$dir" && sha256sum -c --quiet SHA256SUMS ); then ok "checksums match"; else bad "checksum mismatch"; fail=1; fi
+  for f in "$dir"/*.gz; do gzip -t "$f" 2>/dev/null || { bad "corrupt gzip: $f"; fail=1; }; done
+  for f in "$dir"/*.files.tar.gz; do tar -tzf "$f" >/dev/null 2>&1 && ok "archive readable: $(basename "$f")" || { bad "archive broken: $f"; fail=1; }; done
+  for f in "$dir"/*.db.sql.gz; do
+    s=$(basename "$f" .db.sql.gz); local scratch="wsk_verify_$$"
+    sql -e "CREATE DATABASE \`$scratch\`" || { bad "cannot create scratch database"; fail=1; continue; }
+    if gunzip -c "$f" | sql "$scratch"; then
+      local diffs; diffs=$(diff <(_rowcounts "$scratch") "$dir/$s.rowcounts.tsv") && ok "restore test for $s: all table row counts match ($(wc -l < "$dir/$s.rowcounts.tsv") tables)" || { bad "row counts differ for $s"; echo "$diffs"; fail=1; }
+    else bad "SQL restore failed for $s"; fail=1; fi
+    sql -e "DROP DATABASE \`$scratch\`"
+  done
+  (( fail )) && { echo FAIL > "$ETC/last_verify"; return 1; }
+  echo "OK $(date +%s)" > "$ETC/last_verify"; note "${G}backup verified: it can really be restored${N}"
+}
+
+cmd_restore() {
+  local dir=${1:-}; local site=${2:-}; local yes=${3:-}
+  [[ -d $dir && -n $site ]] || die "usage: wsk restore BACKUP_DIR SITE --yes"
+  [[ $yes == --yes ]] || die "restore overwrites the live database. Re-run with --yes"
+  # shellcheck disable=SC1090
+  source "$(site_env "$site")"
+  gunzip -c "$dir/$site.db.sql.gz" | sql "$DB" && ok "database $DB restored from $dir"
+  tar -xzf "$dir/$site.files.tar.gz" -C "$(dirname "$WEBROOT")" "$(basename "$WEBROOT")" && ok "web files restored"
+}
+
+# ---------- certificates --------------------------------------------------------------------
+cert_days() { # file -> days left (negative if expired)
+  local end; end=$(openssl x509 -enddate -noout -in "$1" 2>/dev/null | cut -d= -f2) || return 1
+  [[ -n $end ]] || return 1
+  echo $(( ( $(date -d "$end" +%s) - $(date +%s) ) / 86400 ))
+}
+cmd_certs() {
+  local sub=${1:-list}; local s worst=0
+  if [[ $sub == renew ]]; then
+    local d=${2:-}; [[ -n $d ]] || die "usage: wsk certs renew DOMAIN"
+    # shellcheck disable=SC1090
+    source "$(site_env "$d")"
+    if [[ $CERT_MODE == letsencrypt ]]; then certbot renew --cert-name "$d" && ok "renewed via certbot (reload nginx)"
+    else rm -f "$ETC/certs/$d/fullchain.pem"; ok "self-signed regenerated"; cmd_init_site "$d" --db "$DB" --skip-db --http-port "$HTTP_PORT" --https-port "$HTTPS_PORT" >/dev/null; fi
+    return
+  fi
+  printf '%s%-28s %-12s %6s  %s%s\n' "$B" DOMAIN TYPE DAYS STATE "$N"
+  for s in $(_sites); do
+    # shellcheck disable=SC1090
+    ( source "$(site_env "$s")"; f="$ETC/certs/$s/fullchain.pem"; days=$(cert_days "$f") || { printf '%-28s %-12s %6s  %sMISSING%s\n' "$s" "$CERT_MODE" "-" "$R" "$N"; exit 3; }
+      st="${G}OK${N}"; rc=0; (( days < CERT_WARN_DAYS )) && { st="${Y}RENEW SOON${N}"; rc=1; }; (( days < CERT_CRIT_DAYS )) && { st="${R}CRITICAL${N}"; rc=2; }
+      printf '%-28s %-12s %6s  %s\n' "$s" "$CERT_MODE" "$days" "$st"; exit $rc ); local r=$?; (( r > worst )) && worst=$r
+  done
+  return $worst
+}
+
+# ---------- logs --------------------------------------------------------------------------------
+cmd_logs() {
+  local log=${1:-}; [[ -r $log ]] || { local first; first=$(ls "$LOG_DIR"/*.access.log 2>/dev/null | head -1); log=$first; }
+  [[ -r $log ]] || die "usage: wsk logs ACCESS_LOG"
+  note "${B}Access log report: $log${N}   ($(wc -l < "$log") requests)"
+  echo; echo "Status codes:";   awk '{print $9}' "$log" | sort | uniq -c | sort -rn | head -8 | awk '{printf "  %-6s %s\n",$2,$1}'
+  echo; echo "Top client IPs:"; awk '{print $1}' "$log" | sort | uniq -c | sort -rn | head -5 | awk '{printf "  %-18s %s\n",$2,$1}'
+  echo; echo "Top 404 paths:";  awk '$9==404 {print $7}' "$log" | sort | uniq -c | sort -rn | head -5 | awk '{printf "  %-30s %s\n",$2,$1}'
+  echo; echo "Scanner / attack probes (wp-login, .env, phpmyadmin, .git, /etc/passwd...) by IP:"
+  grep -E -i 'wp-login|wp-admin|\.env|phpmyadmin|\.git/|/etc/passwd|\.\./|xmlrpc|cgi-bin|shell\.php' "$log" | awk '{print $1}' | sort | uniq -c | sort -rn | head -5 | awk '{printf "  %-18s %s probes\n",$2,$1}'
+  echo; echo "Slowest requests (rt=seconds):"
+  awk '{for(i=1;i<=NF;i++) if($i ~ /^rt=/){split($i,a,"="); print a[2], $7}}' "$log" | sort -rn | head -3 | awk '{printf "  %-8s %s\n",$1,$2}'
+  echo; printf 'Bandwidth served: %s MB\n' "$(awk '{s+=$10} END{printf "%.2f", s/1048576}' "$log")"
+}
+
+cmd_logrotate() {
+  local f="${WSK_LOGROTATE_FILE:-$P/etc/logrotate.d/wsk}"; mkdir -p "$(dirname "$f")"
+  cat > "$f" <<L
+$LOG_DIR/*.log {
+    weekly
+    rotate 8
+    missingok
+    notifempty
+    compress
+    delaycompress
+    sharedscripts
+    create 0640 www-data adm
+    postrotate
+        [ -f /run/nginx.pid ] && kill -USR1 \$(cat /run/nginx.pid) || true
+    endscript
+}
+$ETC/*.log {
+    monthly
+    rotate 6
+    missingok
+    notifempty
+    compress
+}
+L
+  ok "wrote $f"; command -v logrotate >/dev/null && logrotate -d "$f" 2>&1 | tail -5
+}
+
+# ---------- health -------------------------------------------------------------------------------
+cmd_health() {
+  local fail=0 warn=0 s json=0; [[ ${1:-} == --json ]] && json=1
+  local out; if out=$(nginx_t); then ok "nginx configuration valid"; else bad "nginx -t: $out"; fail=1; fi
+  if sql -e "SELECT 1" >/dev/null 2>&1; then ok "database answers"; else bad "database not reachable"; fail=1; fi
+  for s in $(_sites); do
+    # shellcheck disable=SC1090
+    source "$(site_env "$s")"
+    local h; h=$(curl -sk -o /dev/null -w '%{http_code} %{redirect_url}' -m 8 --resolve "$s:$HTTP_PORT:127.0.0.1" "http://$s:$HTTP_PORT/") 
+    [[ $h == 301* ]] && ok "$s: http -> https redirect ($h)" || { bad "$s: no redirect ($h)"; fail=1; }
+    local code; code=$(curl -sk -o /dev/null -w '%{http_code}' -m 8 --resolve "$s:$HTTPS_PORT:127.0.0.1" "https://$s:$HTTPS_PORT/")
+    [[ $code == 200 ]] && ok "$s: https answers 200" || { bad "$s: https returned $code"; fail=1; }
+    local hdr; hdr=$(curl -skI -m 8 --resolve "$s:$HTTPS_PORT:127.0.0.1" "https://$s:$HTTPS_PORT/" | tr -d '\r')
+    grep -qi '^x-content-type-options: nosniff' <<<"$hdr" && ok "$s: security headers present" || { wrn "$s: security headers missing"; warn=1; }
+    grep -qi '^server: nginx/' <<<"$hdr" && { wrn "$s: nginx version is exposed"; warn=1; }
+    local days; days=$(cert_days "$ETC/certs/$s/fullchain.pem") || days=""
+    if [[ -z $days ]]; then bad "$s: certificate unreadable"; fail=1
+    elif (( days < CERT_CRIT_DAYS )); then bad "$s: certificate expires in $days days"; fail=1
+    elif (( days < CERT_WARN_DAYS )); then wrn "$s: certificate expires in $days days"; warn=1
+    else ok "$s: certificate valid for $days more days"; fi
+  done
+  local usage; usage=$(df -P "$BACKUP_DIR" 2>/dev/null | awk 'NR==2{gsub("%","",$5); print $5}'); usage=${usage:-0}
+  (( usage < 90 )) && ok "backup disk ${usage}% used" || { bad "backup disk ${usage}% full"; fail=1; }
+  if [[ -s $ETC/last_backup ]]; then local age=$(( ( $(date +%s) - $(cat "$ETC/last_backup") ) / 3600 ))
+    (( age < 26 )) && ok "last backup ${age}h ago" || { wrn "last backup ${age}h ago (older than 26h)"; warn=1; }
+  else wrn "no backup has run yet"; warn=1; fi
+  [[ -s $ETC/last_verify ]] && { grep -q '^OK' "$ETC/last_verify" && ok "last restore-test passed" || { bad "last restore-test FAILED"; fail=1; }; }
+  (( json )) && printf '{"status":"%s"}\n' "$( ((fail)) && echo critical || { ((warn)) && echo warning || echo ok; } )"
+  (( fail )) && return 2; (( warn )) && return 1; return 0
+}
+
+cmd_timers() { # prints a cron file; --apply writes it
+  local f="${WSK_CRON_FILE:-$P/etc/cron.d/wsk}" bin; bin=$(readlink -f "$0")
+  local body="# managed by wsk
+30 2 * * *  root $bin backup  >> $ETC/backup.log 2>&1
+30 4 * * 0  root $bin verify  >> $ETC/backup.log 2>&1
+0  6 * * *  root $bin certs   >> $ETC/certs.log  2>&1
+*/5 * * * * root $bin health  >> $ETC/health.log 2>&1"
+  if [[ ${1:-} == --apply ]]; then mkdir -p "$(dirname "$f")"; printf '%s\n' "$body" > "$f"; ok "wrote $f"; else printf '%s\n\n(add --apply to install)\n' "$body"; fi
+}
+
+cmd_help() { cat <<U
+wsk $WSK_VERSION - Nginx + MariaDB/MySQL + TLS + verified backups + log rotation
+
+  wsk install                              install nginx, mariadb, certbot, rsync, logrotate (apt/dnf, root)
+  wsk init-site DOMAIN [--self-signed | --letsencrypt EMAIL] [--db NAME] [--http-port N --https-port N] [--skip-db]
+  wsk backup                               dump DBs + files, checksum, rotate daily/weekly/monthly, optional rsync off-site
+  wsk verify [BACKUP_DIR|latest]           PROVE the backup restores (scratch database + row-count comparison)
+  wsk restore BACKUP_DIR SITE --yes        restore DB + files
+  wsk certs [list|renew DOMAIN]            certificate expiry table (exit 1 warn, 2 critical)
+  wsk logs [ACCESS_LOG]                    traffic + attack-probe report
+  wsk logrotate                            install logrotate policy for nginx logs
+  wsk health [--json]                      end-to-end check (config, redirect, https, headers, cert, db, backup age)
+  wsk timers [--apply]                     cron schedule for backup/verify/certs/health
+U
+}
+
+case ${1:-help} in
+  install) shift; cmd_install "$@";; init-site) shift; cmd_init_site "$@";; backup) shift; cmd_backup "$@";;
+  verify) shift; cmd_verify "$@";; restore) shift; cmd_restore "$@";; certs) shift; cmd_certs "$@";;
+  logs) shift; cmd_logs "$@";; logrotate) shift; cmd_logrotate "$@";; health) shift; cmd_health "$@";; timers) shift; cmd_timers "$@";;
+  version|--version) echo "wsk $WSK_VERSION";; *) cmd_help;;
+esac

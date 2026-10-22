@@ -1,0 +1,28 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install nginx, MariaDB, logrotate, shellcheck
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq nginx mariadb-server rsync logrotate shellcheck curl openssl
+          sudo systemctl stop nginx mariadb || true      # the tests start their own private instances
+      - name: ShellCheck
+        run: shellcheck -S error -x wsk tests/run.sh
+      - name: Integration tests (real nginx + real MariaDB, unprivileged ports)
+        run: tests/run.sh
+  real-server:
+    # Full root install on a clean Ubuntu VM: systemd, apt, real ports 80/443.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo ./wsk install
+      - run: sudo ./wsk init-site lab.example.test --self-signed
+      - run: sudo systemctl reload nginx
+      - run: sudo ./wsk backup && sudo ./wsk verify
+      - run: sudo ./wsk health
+      - run: sudo ./wsk certs
+      - run: sudo ./wsk logrotate
