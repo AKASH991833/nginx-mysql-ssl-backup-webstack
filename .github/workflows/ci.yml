@@ -26,15 +26,26 @@ jobs:
       - run: sudo ./wsk health
       - run: sudo ./wsk certs
       - run: sudo ./wsk logrotate
-  rocky:
-    # The same unprivileged integration suite on a RHEL-family distro (Rocky 9, dnf packages).
+  rhel-family:
+    # Same checks across the Red Hat family: Rocky, AlmaLinux, CentOS Stream, Fedora,
+    # and Red Hat UBI 9 (the free official Red Hat image - not a RHEL subscription).
     runs-on: ubuntu-latest
-    container: rockylinux:9
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: [rocky-9, alma-9, centos-stream-9, fedora-latest, ubi-9]
+        include:
+          - {distro: rocky-9,          image: rockylinux:9}
+          - {distro: alma-9,           image: almalinux:9}
+          - {distro: centos-stream-9,  image: quay.io/centos/centos:stream9}
+          - {distro: fedora-latest,    image: fedora:latest}
+          - {distro: ubi-9,            image: registry.access.redhat.com/ubi9/ubi:latest}
+    container: ${{ matrix.image }}
     steps:
       - name: Install packages (dnf)
         run: dnf install -y -q git nginx mariadb-server mariadb openssl diffutils rsync logrotate hostname procps-ng findutils gawk which iproute
       - uses: actions/checkout@v4
-      - name: Integration tests on Rocky 9
+      - name: Integration tests on ${{ matrix.distro }}
         run: tests/run.sh
   compose-lab:
     # The container lab is real: build it, probe HTTP/TLS/headers, write rows, run the
