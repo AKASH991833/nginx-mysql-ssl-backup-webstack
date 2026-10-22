@@ -116,6 +116,7 @@ Environment variables (`WSK_*`) let you relocate every path, so you can also run
 - **Not run in the author's sandbox** (needs root/systemd/internet): `wsk install`, real Let's Encrypt issuance, listening on ports 80/443, `systemctl`. The `real-server` job in GitHub Actions installs everything as root on a clean Ubuntu VM and runs `init-site`, `backup`, `verify`, `health`, `certs`, `logrotate` (see the CI badge).
 - `docker-compose.yml` is an untested lab sample.
 - Let's Encrypt mode shells out to `certbot` and was not exercised.
+- **CI result (Oct 22, 2026):** `lint-and-test` and `real-server` are green. The real-server run found and fixed a real bug (a second `gzip on` clashed with the distro nginx.conf) and a logrotate check that was too strict on the CI runner.
 - Tested on Ubuntu 22.04 packages; dnf/RHEL path is written but unverified.
 
 ## Security notes
