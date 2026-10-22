@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # wsk - Nginx + MariaDB/MySQL + TLS + verified backups + log rotation, in one tool
 set -uo pipefail
-WSK_VERSION="1.3.0"
+WSK_VERSION="2.0.0"
 
 # ---------- configuration (all overridable by environment, so tests can run unprivileged) ----------
 P=${WSK_PREFIX:-}                                   # path prefix; empty on a real server
