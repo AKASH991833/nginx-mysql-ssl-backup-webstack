@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/AKASH991833/nginx-mysql-ssl-backup-webstack/actions/workflows/ci.yml/badge.svg)](https://github.com/AKASH991833/nginx-mysql-ssl-backup-webstack/actions/workflows/ci.yml)
 [![release](https://img.shields.io/github/v/release/AKASH991833/nginx-mysql-ssl-backup-webstack)](https://github.com/AKASH991833/nginx-mysql-ssl-backup-webstack/releases)
-![bash](https://img.shields.io/badge/language-bash-4EAA25) ![tested on](https://img.shields.io/badge/tested%20on-ubuntu%20%2B%205x%20RHEL--family%20%2B%20docker-blue) ![nginx](https://img.shields.io/badge/nginx-1.18%2B-009639) ![license](https://img.shields.io/badge/license-MIT-blue)
+![bash](https://img.shields.io/badge/language-bash-4EAA25) ![tested on](https://img.shields.io/badge/tested%20on-ubuntu%20%2B%20debian%2012%2F13%20%2B%205x%20RHEL--family%20%2B%20docker-blue) ![nginx](https://img.shields.io/badge/nginx-1.18%2B-009639) ![license](https://img.shields.io/badge/license-MIT-blue)
 
 A production-style web server stack you can build in one command and *understand* from zero: **Nginx** (hardened, HTTPS, security headers, rate limiting) + **MariaDB/MySQL** (least-privilege user per site) + **TLS** (Let's Encrypt or self-signed lab certs) + **automatic backups that are proven restorable** + **log rotation and log analysis** + an end-to-end **health check**.
 
@@ -125,6 +125,7 @@ Environment variables (`WSK_*`) let you relocate every path, so you can also run
 - Let's Encrypt mode shells out to `certbot` and was not exercised.
 - **CI result (Oct 22, 2026):** `lint-and-test` and `real-server` are green. The real-server run found and fixed a real bug (a second `gzip on` clashed with the distro nginx.conf) and a logrotate check that was too strict on the CI runner.
 - The `rhel-family` CI matrix runs the same full integration suite (real nginx + real MariaDB) on Rocky 9, AlmaLinux 9, CentOS Stream 9 and Fedora (latest), all with dnf packages. Red Hat UBI 9 is deliberately excluded here: its free repos ship the MariaDB client but no `mariadb-server` package, so the suite cannot run there without a RHEL subscription (the other two projects in this profile do run their suites on UBI 9).
+- The `debian` CI matrix runs the same full integration suite (real nginx + real MariaDB) on Debian 12 (bookworm) and Debian 13 (trixie), both with apt packages.
 
 ## Security notes
 Never commit `/etc/wsk` (it holds DB credentials). Keep `wsk-backups` off the web root. Use SSH-key login for `WSK_RSYNC_TARGET`. Test `wsk restore` on a staging machine before you need it.

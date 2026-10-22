@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.2.0] - 2026-10-22
+### Added
+- Debian CI matrix: the full real-nginx + real-MariaDB integration suite on Debian 12
+  (bookworm) and Debian 13 (trixie) with apt packages.
+
 ## [1.1.0] - 2026-10-22
 ### Added
 - The docker-compose lab is now complete (vhost, site, cert generator, backup sidecar script)

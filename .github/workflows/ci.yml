@@ -84,3 +84,24 @@ jobs:
       - name: Tear down
         if: always()
         run: cd examples && docker compose down -v
+  debian:
+    # The full real-nginx + real-MariaDB suite on Debian 12 (bookworm, oldstable)
+    # and Debian 13 (trixie, stable) - apt path, nginx as www-data by default.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: [debian-12, debian-13]
+        include:
+          - {distro: debian-12, image: debian:12}
+          - {distro: debian-13, image: debian:13}
+    container: ${{ matrix.image }}
+    steps:
+      - name: Install packages (apt)
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends git nginx mariadb-server openssl diffutils rsync logrotate hostname procps curl ca-certificates
+      - uses: actions/checkout@v4
+      - name: Integration tests on ${{ matrix.distro }}
+        run: tests/run.sh
