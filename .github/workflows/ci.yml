@@ -26,6 +26,7 @@ jobs:
       - run: sudo ./wsk health
       - run: sudo ./wsk certs
       - run: sudo ./wsk logrotate
+      - run: sudo ./wsk timers --apply && sudo ./wsk timers --check && sudo ./wsk guard health 120 health && sudo ./wsk timers --status
   rhel-family:
     # Same checks across the Red Hat family: Rocky, AlmaLinux, CentOS Stream, Fedora,
     # and Red Hat UBI 9 (the free official Red Hat image - not a RHEL subscription).

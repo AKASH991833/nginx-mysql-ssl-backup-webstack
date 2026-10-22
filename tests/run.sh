@@ -103,5 +103,44 @@ out=$($WSK health 2>&1); rc=$?
 assert "health FAILS (exit 2) on a broken nginx vhost"  '(( rc == 2 )) && grep -q "nginx -t" <<<"$out"'
 cp "$T/vhost.bak" "$WSK_NGINX_CONFD/$SITE.conf"
 
+echo "== scheduled jobs: guarded cron file, validation, overlap/timeout protection"
+$WSK timers --apply >/dev/null
+assert "timers --apply wrote a cron file with 4 guarded jobs"  '[[ $(grep -c " guard " "$WSK_CRON_FILE") == 4 ]] && grep -q "^MAILTO=" "$WSK_CRON_FILE"'
+out=$($WSK timers --check); rc=$?
+assert "timers --check accepts the generated file"             '(( rc == 0 )) && grep -q "is valid" <<<"$out"'
+cp "$WSK_CRON_FILE" "$T/cron.bad"; sed -i 's|^30 2 \* \* \*|61 2 * * *|' "$T/cron.bad"; echo '0 1 * * * root /nonexistent/wsk backup' >> "$T/cron.bad"; echo '0 1 * * * nosuchuser '"$PWD/wsk"' backup' >> "$T/cron.bad"; echo '0 1 * * * root '"$PWD"'/wsk logs date +%F' >> "$T/cron.bad"
+out=$($WSK timers --check "$T/cron.bad"); rc=$?
+assert "check catches bad schedule, missing binary, unknown user, unescaped %" '(( rc == 2 )) && grep -q "invalid schedule" <<<"$out" && grep -q "not an executable" <<<"$out" && grep -q "does not exist" <<<"$out" && grep -q "unescaped %" <<<"$out"'
+$WSK guard okjob 20 version >/dev/null; rc=$?
+assert "guard: success logged, rc 0"                           '(( rc == 0 )) && grep -q "okjob end rc=0" "$WSK_ETC/okjob.log"'
+$WSK guard backup 20 restore /nonexistent nosite --yes >/dev/null 2>&1; rc=$?
+assert "guard: failing job returns non-zero and records it"    '(( rc != 0 )) && grep -q "^rc=$rc" "$WSK_ETC/status/backup"'
+out=$($WSK timers --status); rc=$?
+assert "timers --status flags the failed job (exit 2)"         '(( rc == 2 )) && grep -q "never-run" <<<"$out"'
+out=$($WSK health 2>&1)
+assert "health reports the failed scheduled job"               'grep -q "scheduled job .backup. last exited" <<<"$out"'
+rm -f "$WSK_ETC/status/backup"
+( flock "$WSK_ETC/locks/health.lock" sleep 3 & ); sleep 0.7
+$WSK guard health 20 version >/dev/null; rc=$?
+assert "guard: overlapping run skipped quietly (rc 0)"         '(( rc == 0 )) && grep -q "health skipped, previous run still active" "$WSK_ETC/health.log"'
+sleep 3.2
+printf '#!/bin/sh\nsleep 30\n' > "$T/slowsql"; chmod +x "$T/slowsql"
+WSK_MYSQL="$T/slowsql" $WSK guard health 2 health >/dev/null 2>&1; rc=$?
+assert "guard: a hung job is killed by the timeout (rc 124)"   '(( rc == 124 ))'
+rm -f "$WSK_ETC/status/health"
+$WSK guard health 20 version >/dev/null
+assert "guard: lock is free again after a killed job"          'flock -n "$WSK_ETC/locks/health.lock" true'
+$WSK timers --remove >/dev/null
+assert "timers --remove deletes the cron file"                 '[[ ! -e $WSK_CRON_FILE ]]'
+
+echo "== storage awareness in wsk health"
+printf 'md0 : active raid1 sdb1[0]\n      1046528 blocks super 1.2 [2/1] [U_]\n' > "$T/mdstat"
+out=$(WSK_MDSTAT="$T/mdstat" $WSK health 2>&1); rc=$?
+assert "degraded RAID makes health FAIL (exit 2)"              '(( rc == 2 )) && grep -q "software RAID problem: md0(degraded 1/2)" <<<"$out"'
+printf 'md0 : active raid1 sdc1[1] sdb1[0]\n      1046528 blocks super 1.2 [2/2] [UU]\n' > "$T/mdstat"
+out=$(WSK_MDSTAT="$T/mdstat" $WSK health 2>&1)
+assert "healthy RAID reported OK"                              'grep -q "software RAID arrays complete" <<<"$out"'
+assert "data/backup/web filesystems usage is reported"         'grep -Eq "(ok|OK).*% used|on .* [0-9]+% used" <<<"$out" || grep -q "% used" <<<"$out"'
+
 echo; echo "passed: $PASS   failed: $FAIL"
 (( FAIL == 0 ))
