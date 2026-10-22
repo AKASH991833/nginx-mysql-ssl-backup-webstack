@@ -66,7 +66,8 @@ write_apache_global() {
   mkdir -p "$APACHE_CONFD"
   cat > "$APACHE_CONFD/00-wsk-global.conf" <<'G'
 # managed by wsk - global hardening for every site (apache)
-ServerTokens Prod                       # do not advertise the apache version
+# (comments must be on their own line in apache config)
+ServerTokens Prod
 ServerSignature Off
 # same field layout as the nginx "wsk" format, so `wsk logs` parses both
 LogFormat "%h %l %u %t \"%r\" %>s %b \"%{Referer}i\" \"%{User-Agent}i\" rt=%T" wsk
