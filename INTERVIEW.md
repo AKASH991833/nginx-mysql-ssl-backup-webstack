@@ -112,5 +112,12 @@ Point-in-time recovery with binlog shipping, encrypted backups (age/gpg) before 
 a restore rehearsal timer (weekly automatic verify already exists via `wsk timers`), Prometheus
 metrics endpoint, and a WordPress/Laravel preset for init-site.
 
+## Scheduled jobs (v1.3.0)
+**Why wrap cron jobs?** Cron does not care that the last run is still going. `flock -n` skips the overlap, the kernel releases it if the job dies, and a timeout kills a hung dump. The status file lets `wsk health` fail loudly when a job last failed.
+
+**Why validate before installing?** A broken file in `/etc/cron.d` is ignored silently. Validation catches bad fields, missing binaries and unescaped `%` first.
+
+**Limits:** no LVM snapshot DB backup here, and RAID checks are fixture-tested in this repo.
+
 ## Honest test status
 See the README "Honest test report" - it is kept in sync with CI and names exactly what ran where.

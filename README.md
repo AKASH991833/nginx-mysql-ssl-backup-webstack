@@ -104,6 +104,16 @@ Logs grow forever and fill the disk. `wsk logrotate` installs a policy: weekly, 
 `wsk health` verifies nginx config, DB answer, HTTP to HTTPS redirect, HTTPS 200, headers, version hidden, certificate days, disk space of the backup volume, backup age (<26h) and the last restore-test. Exit code 0 ok, 1 warning, 2 critical, so it plugs into cron, Nagios, Zabbix, or Uptime Kuma.
 ![health](docs/img/health.png)
 
+### Scheduled jobs that cannot pile up (v1.3.0)
+```
+wsk timers            # show the guarded cron file
+wsk timers --apply    # validate, then install /etc/cron.d/wsk (old file kept as .bak)
+wsk timers --check    # catches bad schedules, unknown user, missing binary, unescaped %
+wsk timers --status   # last result of each job; exit 2 if any failed
+wsk guard backup 10800 backup   # what the cron line runs: flock + timeout + status
+```
+A backup that runs longer than a day must not start a second copy, and a hung `mysqldump` must not block tomorrow. `wsk health` also warns when a filesystem is filling up (with an `lvextend -r` hint on LVM) and fails when a software RAID is degraded.
+
 ## Command reference
 | Command | Purpose |
 |---|---|
@@ -128,6 +138,8 @@ Environment variables (`WSK_*`) let you relocate every path, so you can also run
 - The `debian` CI matrix runs the same full integration suite (real nginx + real MariaDB) on Debian 12 (bookworm) and Debian 13 (trixie), both with apt packages.
 - **Apache verified:** the `apache` CI matrix runs a dedicated scenario suite (real httpd + real MariaDB: init-site, configtest gating, redirect, HTTPS, headers, version hidden, dotfile/dot-directory and .sql blocking, TLS 1.1 refusal, ACME challenge path, backup capturing the vhost, health, and a broken-config drill) on Debian 12, Debian 13, Rocky 9 and Ubuntu 24.04. Apache mode covers vhost provisioning + health; rate limiting stays nginx-only (honest gap).
 - The suites also drill real failure scenarios: a corrupted backup (checksum catches it), disaster restore after table loss, an expiring certificate (CRITICAL + renew), a down web server (health exits 2), and a hand-broken vhost config (health catches it, then passes after repair).
+
+**v1.3.0 tests:** `tests/run.sh` (all distros in CI) runs real `flock`/`timeout` on guarded jobs: overlap is skipped, a hung job is killed at the timeout, a failed job shows in `health`, a bad cron file is rejected. RAID health is tested against `/proc/mdstat` fixtures only (no real RAID drill in this repo; those are in the other two). The `real-server` job installs and checks the cron file on an Ubuntu VM.
 
 ## Security notes
 Never commit `/etc/wsk` (it holds DB credentials). Keep `wsk-backups` off the web root. Use SSH-key login for `WSK_RSYNC_TARGET`. Test `wsk restore` on a staging machine before you need it.

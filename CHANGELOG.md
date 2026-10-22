@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.3.0] - 2026-10-22
+### Added
+- `wsk guard JOB SECONDS subcommand`: flock (no overlapping backups), hard timeout, log and status file. The generated cron lines all use it.
+- `wsk timers --check [FILE]` (schedule fields, user, absolute executable path, unescaped `%`), `--remove`, `--status`. `--apply` validates the file before it goes live and keeps a `.bak`.
+- `wsk health` now reports data/backup/web filesystem fullness (with an LVM `lvextend -r` hint when on LVM), software RAID degraded/inactive, and failed scheduled jobs.
+### Not done (honest)
+- No LVM-snapshot-consistent database backup in this repo; the toolkit's `sysops lvm backup` covers LVM. Real LVM/RAID drills live in the other two repos; here RAID/fs checks are fixture-tested.
+
 ## [1.2.0] - 2026-10-22
 ### Added
 - Debian CI matrix: the full real-nginx + real-MariaDB integration suite on Debian 12
