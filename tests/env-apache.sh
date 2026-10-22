@@ -19,7 +19,11 @@ A=$T/apache; mkdir -p "$A/conf.d" "$A/logs" "$A/run"
   echo "ErrorLog \"$A/logs/error.log\""
   echo "LogLevel warn"
   echo "Mutex file:$A/run"
-  [[ $EUID -eq 0 ]] && echo "User root"   # containers/CI run as root; same fix as the nginx suite
+  if [[ $EUID -eq 0 ]]; then   # httpd refuses "User root" (unlike nginx); run workers as the distro's web user
+    if id www-data >/dev/null 2>&1; then echo "User www-data"; echo "Group www-data"
+    elif id apache >/dev/null 2>&1; then echo "User apache"; echo "Group apache"
+    else echo "User daemon"; echo "Group daemon"; fi
+  fi
   echo "TypesConfig /etc/mime.types"
   for m in mpm_event mpm_prefork; do [[ -e $MODDIR/mod_$m.so ]] && { echo "LoadModule ${m}_module $MODDIR/mod_$m.so"; break; }; done
   for m in unixd authz_core dir mime log_config alias rewrite ssl headers; do
@@ -29,6 +33,7 @@ A=$T/apache; mkdir -p "$A/conf.d" "$A/logs" "$A/run"
   echo "IncludeOptional \"$A/conf.d/*.conf\""
 } > "$A/httpd.conf"
 printf '#!/bin/sh\nexec %s -d %s -f %s/httpd.conf "$@"\n' "$APBIN" "$A" "$A" > "$T/apache-wrap"; chmod +x "$T/apache-wrap"
+chmod 711 "$T"   # mktemp dirs are 700; apache workers (www-data/apache) must traverse to the webroot
 "$T/apache-wrap" -t || { echo "apache config test failed at startup"; cat "$A/logs/error.log" 2>/dev/null; exit 3; }
 
 export WSK_SERVER=apache WSK_APACHE_CONFD="$A/conf.d" WSK_APACHE_T="$T/apache-wrap -t" \
