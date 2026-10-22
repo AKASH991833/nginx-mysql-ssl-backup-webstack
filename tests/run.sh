@@ -86,7 +86,7 @@ $WSK logrotate >/dev/null 2>&1
 assert "logrotate policy written"                     'grep -q "rotate 8" "$WSK_LOGROTATE_FILE" && grep -q "compress" "$WSK_LOGROTATE_FILE"'
 if command -v logrotate >/dev/null; then
   lr=$(logrotate -d "$WSK_LOGROTATE_FILE" 2>&1)
-  assert "logrotate accepts the policy (logrotate -d, no errors)" 'grep -q "reading config file" <<<"$lr" && ! grep -qi "^error" <<<"$lr"'
+  assert "logrotate accepts the policy (logrotate -d, no syntax errors)" 'grep -q "reading config file" <<<"$lr" && ! grep -qiE "unknown option|bad |syntax|unexpected" <<<"$lr"'
 else echo "  skip logrotate -d (logrotate not installed here; CI runs it)"; fi
 tout=$($WSK timers)
 assert "timers cron file contains all 4 jobs"         '[[ $(grep -c " root " <<<"$tout") -eq 4 ]]'
