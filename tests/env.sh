@@ -17,7 +17,7 @@ BASEDIR_ARG=""; [[ -n ${WSK_TEST_BASEDIR:-} ]] && BASEDIR_ARG="--basedir=$WSK_TE
 $INSTALL_DB --no-defaults --datadir="$T/data" $BASEDIR_ARG --auth-root-authentication-method=normal --skip-test-db >"$T/install.log" 2>&1
 ( $MYSQLD --no-defaults --datadir="$T/data" $BASEDIR_ARG --socket="$T/s.sock" --pid-file="$T/mysqld.pid" --port=0 --skip-networking >"$T/mysqld.log" 2>&1 & )
 for _ in $(seq 1 40); do $CLI -S "$T/s.sock" -uroot -e 'select 1' >/dev/null 2>&1 && break; sleep 0.5; done
-$CLI -S "$T/s.sock" -uroot -e 'select 1' >/dev/null 2>&1 || { echo "MariaDB did not start"; tail -5 "$T/mysqld.log"; exit 3; }
+$CLI -S "$T/s.sock" -uroot -e 'select 1' >/dev/null 2>&1 || { echo "MariaDB did not start"; echo "--- mysqld.log:"; tail -15 "$T/mysqld.log"; echo "--- install.log:"; tail -15 "$T/install.log"; echo "MYSQLD=$MYSQLD INSTALL_DB=$INSTALL_DB"; exit 3; }
 
 # ---- nginx wrapper using a private prefix ----
 mkdir -p "$T/nginx/conf.d" "$T/nginx/logs" "$T/log"
