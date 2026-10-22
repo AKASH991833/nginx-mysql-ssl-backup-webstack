@@ -124,7 +124,7 @@ Environment variables (`WSK_*`) let you relocate every path, so you can also run
 - The docker-compose lab is exercised end-to-end by the `compose-lab` CI job on every push: containers start, HTTP 301 / HTTPS 200 / headers / dotfile-403 are checked, a backup is taken and **restored into a scratch database with row-count verification**.
 - Let's Encrypt mode shells out to `certbot` and was not exercised.
 - **CI result (Oct 22, 2026):** `lint-and-test` and `real-server` are green. The real-server run found and fixed a real bug (a second `gzip on` clashed with the distro nginx.conf) and a logrotate check that was too strict on the CI runner.
-- The `rhel-family` CI matrix runs the same full integration suite (real nginx + real MariaDB) on Rocky 9, AlmaLinux 9, CentOS Stream 9, Fedora (latest) and Red Hat UBI 9 (the free official Red Hat build - no RHEL subscription claimed), all with dnf packages.
+- The `rhel-family` CI matrix runs the same full integration suite (real nginx + real MariaDB) on Rocky 9, AlmaLinux 9, CentOS Stream 9 and Fedora (latest), all with dnf packages. Red Hat UBI 9 is deliberately excluded here: its free repos ship the MariaDB client but no `mariadb-server` package, so the suite cannot run there without a RHEL subscription (the other two projects in this profile do run their suites on UBI 9).
 
 ## Security notes
 Never commit `/etc/wsk` (it holds DB credentials). Keep `wsk-backups` off the web root. Use SSH-key login for `WSK_RSYNC_TARGET`. Test `wsk restore` on a staging machine before you need it.

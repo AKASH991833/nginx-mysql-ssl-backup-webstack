@@ -33,18 +33,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        distro: [rocky-9, alma-9, centos-stream-9, fedora-latest, ubi-9]
+        # UBI 9 is intentionally absent: the free UBI repos ship the MariaDB client
+        # but no mariadb-server package, so this suite cannot run there without a RHEL subscription.
+        distro: [rocky-9, alma-9, centos-stream-9, fedora-latest]
         include:
           - {distro: rocky-9,          image: rockylinux:9}
           - {distro: alma-9,           image: almalinux:9}
           - {distro: centos-stream-9,  image: quay.io/centos/centos:stream9}
           - {distro: fedora-latest,    image: fedora:latest}
-          - {distro: ubi-9,            image: registry.access.redhat.com/ubi9/ubi:latest}
     container: ${{ matrix.image }}
     steps:
-      - name: Enable MariaDB module stream (UBI 9 only - AppStream is modular there)
-        if: matrix.distro == 'ubi-9'
-        run: dnf module enable -y mariadb:10.5
       - name: Install packages (dnf)
         run: dnf install -y -q git nginx mariadb-server mariadb openssl diffutils rsync logrotate hostname procps-ng findutils gawk which iproute
       - uses: actions/checkout@v4
