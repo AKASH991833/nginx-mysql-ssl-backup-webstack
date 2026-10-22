@@ -42,6 +42,9 @@ jobs:
           - {distro: ubi-9,            image: registry.access.redhat.com/ubi9/ubi:latest}
     container: ${{ matrix.image }}
     steps:
+      - name: Enable MariaDB module stream (UBI 9 only - AppStream is modular there)
+        if: matrix.distro == 'ubi-9'
+        run: dnf module enable -y mariadb:10.5
       - name: Install packages (dnf)
         run: dnf install -y -q git nginx mariadb-server mariadb openssl diffutils rsync logrotate hostname procps-ng findutils gawk which iproute
       - uses: actions/checkout@v4

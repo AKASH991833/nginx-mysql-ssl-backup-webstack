@@ -7,7 +7,7 @@ trap cleanup EXIT
 NGINX=$(command -v nginx || ls /usr/sbin/nginx 2>/dev/null)
 MYSQLD=$(command -v mariadbd || command -v mysqld || ls /usr/sbin/mariadbd /usr/sbin/mysqld /usr/libexec/mariadbd /usr/libexec/mysqld 2>/dev/null | head -1)
 CLI=$(command -v mariadb || command -v mysql)
-[[ $EUID -eq 0 ]] && USER_ARG="--user=root"   # containers/CI run as root; mysqld refuses to run as root without this
+USER_ARG=""; [[ $EUID -eq 0 ]] && USER_ARG="--user=root"   # containers/CI run as root; mysqld refuses to run as root without this
 DUMP=$(command -v mariadb-dump || command -v mysqldump)
 INSTALL_DB=$(command -v mariadb-install-db || command -v mysql_install_db || true)
 [[ -n $NGINX && -n $MYSQLD && -n $CLI ]] || { echo "need nginx + mariadbd + client on PATH"; exit 3; }
