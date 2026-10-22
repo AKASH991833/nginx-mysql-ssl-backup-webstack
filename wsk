@@ -110,9 +110,9 @@ Listen $sp
         Options -Indexes
     </Directory>
     RewriteEngine on
-    RewriteRule "(^|/)\.(?!well-known)" - [F]          # .git, .env, .htaccess ...
+    RewriteRule "(^|/)\.(?!well-known)" - [F]
     <FilesMatch "\.(sql|bak|old|swp)$">
-        Require all denied                              # leftovers
+        Require all denied
     </FilesMatch>
 
     CustomLog "$LOG_DIR/$domain.access.log" wsk
