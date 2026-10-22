@@ -6,7 +6,6 @@ trap cleanup EXIT
 
 NGINX=$(command -v nginx || ls /usr/sbin/nginx 2>/dev/null)
 [[ -n $NGINX ]] || { echo "need nginx on PATH"; exit 3; }
-USER_ARG=""; [[ $EUID -eq 0 ]] && USER_ARG="--user=root"   # containers/CI run as root; mysqld refuses to run as root without this
 
 . "$(dirname "$0")/env-db.sh"   # starts MariaDB, exports WSK_MYSQL / WSK_MYSQLDUMP, sets CLI MYSQLD DUMP
 

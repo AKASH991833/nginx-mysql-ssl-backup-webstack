@@ -6,6 +6,7 @@ CLI=$(command -v mariadb || command -v mysql)
 DUMP=$(command -v mariadb-dump || command -v mysqldump)
 INSTALL_DB=$(command -v mariadb-install-db || command -v mysql_install_db || true)
 [[ -n $MYSQLD && -n $CLI ]] || { echo "need mariadbd + client on PATH"; exit 3; }
+USER_ARG=""; [[ $EUID -eq 0 ]] && USER_ARG="--user=root"   # containers/CI run as root; mysqld refuses to run as root without this
 
 # ---- start MariaDB as the current user ----
 BASEDIR_ARG=""; [[ -n ${WSK_TEST_BASEDIR:-} ]] && BASEDIR_ARG="--basedir=$WSK_TEST_BASEDIR"   # only needed for a non-system install
