@@ -10,11 +10,11 @@ PASS=0; FAIL=0
 ok()  { PASS=$((PASS+1)); printf '  \e[32mok\e[0m   %s\n' "$1"; }
 bad() { FAIL=$((FAIL+1)); printf '  \e[31mFAIL\e[0m %s\n' "$1"; }
 assert() { if eval "$2"; then ok "$1"; else bad "$1   [$2]"; fi; }
-SITE=apache_example_test
+SITE=apache.example.test
 H="--resolve $SITE:18081:127.0.0.1 --resolve $SITE:18444:127.0.0.1"
 
 echo "== init-site --server=apache"
-out=$($WSK init-site $SITE --self-signed --http-port 18081 --https-port 18444 --server apache 2>&1)
+out=$($WSK init-site $SITE --self-signed --http-port 18081 --https-port 18444 --server apache 2>&1) || { echo "$out"; exit 3; }
 assert "apache configtest passed inside init-site"   'grep -q "apache configtest passed" <<<"$out"'
 assert "vhost + global snippet written"              '[[ -s $WSK_APACHE_CONFD/$SITE.conf && -s $WSK_APACHE_CONFD/00-wsk-global.conf ]]'
 assert "least-privilege DB user + 600 credentials"   '[[ $(stat -c %a "$WSK_ETC/sites/$SITE.my.cnf") == 600 ]] && grep -q "apache_example_test_app" "$WSK_ETC/sites/$SITE.my.cnf"'

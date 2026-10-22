@@ -128,7 +128,7 @@ jobs:
           apt-get install -y -qq --no-install-recommends git apache2 mariadb-server openssl diffutils rsync procps curl ca-certificates
       - name: Install packages (dnf)
         if: matrix.pm == 'dnf'
-        run: dnf install -y -q git httpd mod_ssl mariadb-server mariadb openssl diffutils rsync procps-ng curl hostname
+        run: dnf install -y -q git httpd mod_ssl mariadb-server mariadb openssl diffutils rsync procps-ng hostname
       - uses: actions/checkout@v4
       - name: Apache scenario suite on ${{ matrix.distro }}
         run: tests/run-apache.sh
