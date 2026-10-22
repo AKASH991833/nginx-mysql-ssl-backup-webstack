@@ -4,7 +4,7 @@ cd "$(dirname "$0")/.."
 format=${1:?usage: packaging/build.sh deb|rpm}
 name=nginx-mysql-ssl-backup-webstack
 cmd=wsk
-version=2.0.0
+version=2.1.0
 out=$PWD/dist
 mkdir -p "$out"
 t=$(mktemp -d); trap 'rm -rf "$t"' EXIT

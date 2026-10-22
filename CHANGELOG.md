@@ -1,3 +1,11 @@
+## 2.1.0
+
+- `wsk restore-test [BACKUP|latest] [--json] [--max-age S]`: automated restore verification for cron. Re-runs the full media + database proof of `wsk verify`, extracts every files archive completely, reports drift between the backup and the live webroot, and fails when the newest backup is older than the RPO limit (default 26 h, `WSK_RESTORE_TEST_MAX_AGE`). Writes versioned JSON + text reports to `/etc/wsk/reports/` (14 kept) and a `last_restore_test` status file.
+- `wsk dr-drill [--keep] [--json] [--max-rto S]`: a real disaster-recovery drill. Every site is recovered from the latest backup into an isolated root - scratch databases with row-count proof, files from the archives, the saved vhosts rewritten to drill ports - then a private nginx is booted and probed over HTTP/HTTPS like a visitor, including a byte comparison of the served page against the restored files. Measures RTO and backup age; the live site, database and nginx are never touched. `--max-rto S` turns the drill into an RTO gate.
+- A nightly guarded `restore-test` cron job joins the schedule (`wsk timers`), so restore verification runs unattended and `wsk health` / `wsk timers --status` flag a failed run.
+- restore-drill/LEARN.md study guide: RPO/RTO, why untested backups are hopes, how to read the drill report.
+- 17 new integration checks (66 total): restore-test pass/corruption/staleness, drill recovery over HTTPS, cleanup and reporting. CI also runs both commands as root on a clean Ubuntu VM.
+
 ## 2.0.0
 
 - Native architecture-independent DEB/RPM packages with actual install/version/remove matrix CI.

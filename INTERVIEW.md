@@ -1,7 +1,7 @@
 # INTERVIEW.md - how to explain this project (wsk)
 
 The 60-second pitch, the architecture, the design choices a hiring manager will ask about,
-and 10 questions with strong answers. Everything here matches the code and the test suite.
+and questions with strong answers. Everything here matches the code and the test suite.
 
 ## The 60-second pitch
 
@@ -23,11 +23,13 @@ wsk (one entry point)
  |                  the generated vhost is kept only if nginx -t passes
  |- backup         mariadb-dump --single-transaction + files + vhost + SHA256 + manifest
  |- verify         restore the dump into a scratch DB, diff row counts per table
+ |- restore-test   scheduled verification: media+DB proof, full extraction, drift, RPO age
+ |- dr-drill       rebuild every site from a backup in an isolated root, serve it, measure RTO
  |- restore        reverse of backup, requires --yes
  |- certs          expiry watchdog (exit 1 = renew soon, 2 = critical), renew
  |- logs/logrotate top IPs, status codes, scanner probes; rotation policy
  |- health         nginx -t, DB, 301, 200, headers, TLS days, backup age, last verify
-tests/             starts a REAL nginx + REAL MariaDB as an ordinary user (34 checks)
+tests/             starts a REAL nginx + REAL MariaDB as an ordinary user (66 checks)
 examples/          docker-compose lab (built, probed, backed up and restored in CI)
 ```
 
@@ -53,7 +55,7 @@ examples/          docker-compose lab (built, probed, backed up and restored in 
 8. **Exit codes as a contract.** health: 0 ok / 1 warn / 2 crit; certs: 0 ok / 1 renew-soon /
    2 critical. Cron, Nagios, Zabbix or Uptime Kuma can consume them directly.
 
-## 10 interview Q&A
+## Interview Q&A
 
 **1. Why is "backup verified by restore" such a big deal?**
 Because write-only backup scripts fail silently: full disks, corrupted dumps, wrong permissions -
@@ -111,6 +113,24 @@ unprivileged suite. It is a single-server design - multi-node needs orchestratio
 Point-in-time recovery with binlog shipping, encrypted backups (age/gpg) before the rsync copy,
 a restore rehearsal timer (weekly automatic verify already exists via `wsk timers`), Prometheus
 metrics endpoint, and a WordPress/Laravel preset for init-site.
+
+**11. How is restore-test different from verify?**
+verify proves one backup *can* be restored, when you run it by hand. restore-test is the same
+proof packaged for automation: it re-runs verify, extracts every files archive completely,
+reports drift between the backup and the live webroot, and enforces an RPO - it fails when the
+newest backup is older than the limit (default 26 h). It writes versioned JSON + text reports
+and a status file, runs nightly from the guarded cron schedule, and a failed run shows up in
+`wsk health` and `wsk timers --status`.
+
+**12. Walk me through your disaster-recovery drill.**
+`wsk dr-drill` pretends the server is gone without touching it: it recovers every site from
+the latest backup into an isolated root - scratch databases with row-count proof, files from
+the archives, the saved vhosts rewritten to drill ports - then boots a private nginx and probes
+it like a visitor: 301 redirect, HTTPS 200, and the served page is byte-compared with the
+restored files. It prints the measured RTO and the backup age, and `--max-rto` makes an overrun
+fail the drill. Certificates are the documented gap: they are not in the backup (they can be
+reissued), so the drill reuses the live ones and says so. Apache sites get DB + file recovery
+but no DR web serving yet - also reported, not hidden.
 
 ## Scheduled jobs (v1.3.0)
 **Why wrap cron jobs?** Cron does not care that the last run is still going. `flock -n` skips the overlap, the kernel releases it if the job dies, and a timeout kills a hung dump. The status file lets `wsk health` fail loudly when a job last failed.

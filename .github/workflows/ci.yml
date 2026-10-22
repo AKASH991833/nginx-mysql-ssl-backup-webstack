@@ -26,6 +26,8 @@ jobs:
       - run: sudo ./wsk init-site lab.example.test --self-signed
       - run: sudo systemctl reload nginx
       - run: sudo ./wsk backup && sudo ./wsk verify
+      - run: sudo ./wsk restore-test
+      - run: sudo ./wsk dr-drill --max-rto 120
       - run: sudo ./wsk health
       - run: sudo ./wsk certs
       - run: sudo ./wsk logrotate

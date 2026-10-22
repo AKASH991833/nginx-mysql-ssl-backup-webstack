@@ -11,6 +11,7 @@ Learn paths (`pwd`, `ls`, `cd`), permissions (`ls -l`, `chmod`), users (`id`), p
 3. Packages: packaging/LEARN.md here explains how a tool becomes a .deb/.rpm, how an index works, and how signing/trust bootstrap differs from HTTPS.
 4. Metrics: monitoring/LEARN.md in the shared repository explains an exporter, Prometheus, Grafana, alert rules and missing data. A container demo is not full host monitoring.
 5. Incidents: incidents/LEARN.md in the shared repository explains evidence, detection, containment, rollback and eradication. Rollback can reintroduce a security problem.
+6. Backups: restore-drill/LEARN.md here explains restore testing, RPO and RTO, drift, and running a disaster-recovery drill that never touches the live site.
 
 Shared repository: https://github.com/AKASH991833/linux-server-hardening-monitoring
 

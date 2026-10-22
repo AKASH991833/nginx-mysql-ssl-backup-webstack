@@ -53,6 +53,38 @@ $WSK restore "$B" $SITE --yes >/dev/null 2>&1
 assert "restore brings the data back (3 rows)"        '[[ $($CLI -S $T/s.sock -uroot -N -e "select count(*) from shop_example_test.visits") == 3 ]]'
 assert "restore brings the web files back"            '[[ -s $WSK_WEBROOT_BASE/$SITE/public/index.html ]]'
 
+echo "== restore-test (automated verification: media, database, files, freshness)"
+out=$($WSK restore-test 2>&1); rc=$?
+assert "restore-test passes on the good backup"            '(( rc == 0 )) && grep -q "restore-test PASSED" <<<"$out"'
+assert "restore-test wrote JSON + text reports"            'ls "$WSK_ETC"/reports/restore-test-*.json >/dev/null 2>&1 && ls "$WSK_ETC"/reports/restore-test-*.txt >/dev/null 2>&1'
+assert "restore-test JSON report says pass"                'grep -q "\"result\":\"pass\"" "$WSK_ETC"/reports/restore-test-*.json'
+assert "restore-test extraction + freshness lines shown"   'grep -q "extracts completely" <<<"$out" && grep -q "backup is fresh" <<<"$out"'
+out=$($WSK restore-test --json 2>/dev/null | tail -1)
+assert "restore-test --json prints the JSON report"        'grep -q "\"command\":\"restore-test\"" <<<"$out"'
+cp -a "$B" "$T/B-bad"; echo garbage >> "$T/B-bad/$SITE.db.sql.gz"
+out=$($WSK restore-test "$T/B-bad" 2>&1); rc=$?
+assert "restore-test FAILS (rc 1) on a corrupted backup"   '(( rc == 1 ))'
+rm -rf "$T/B-bad"
+cp -a "$B" "$T/B-old"; sed -i "s/\"created\":\"[^\"]*\"/\"created\":\"$(date -u -d '5 days ago' +%FT%TZ)\"/" "$T/B-old/manifest.json"
+out=$($WSK restore-test "$T/B-old" --max-age 93600 2>&1); rc=$?
+assert "restore-test FAILS on a stale backup (RPO breach)" '(( rc == 1 )) && grep -q "RPO breach" <<<"$out"'
+rm -rf "$T/B-old"
+
+echo "== dr-drill (disaster-recovery drill into an isolated root)"
+export WSK_DR_NGINX_BIN=$NGINX
+out=$($WSK dr-drill 2>&1); rc=$?
+assert "dr-drill passes"                                   '(( rc == 0 )) && grep -q "DR drill PASSED" <<<"$out"'
+assert "drill restored the database (row counts match)"    'grep -q "database restored, all table row counts match" <<<"$out"'
+assert "drill served the recovered site over HTTPS"        'grep -q "recovered https answers 200" <<<"$out"'
+assert "drill redirect recovered (301)"                    'grep -q "recovered http -> https redirect (301)" <<<"$out"'
+assert "drill wrote JSON + text reports"                   'ls "$WSK_ETC"/reports/dr-drill-*.json >/dev/null 2>&1 && ls "$WSK_ETC"/reports/dr-drill-*.txt >/dev/null 2>&1'
+assert "drill JSON carries RTO + result"                   'grep -q "\"rto_seconds\":" "$WSK_ETC"/reports/dr-drill-*.json && grep -q "\"result\":\"pass\"" "$WSK_ETC"/reports/dr-drill-*.json'
+assert "drill cleaned up its scratch databases"            '! $CLI -S $T/s.sock -uroot -N -e "show databases" | grep -q wsk_dr'
+assert "drill removed its isolated root"                   '! ls -d "$T/root/var/lib/wsk/dr-drill"/*/ >/dev/null 2>&1'
+assert "drill server is really stopped"                    '! curl -sk --max-time 2 -o /dev/null https://127.0.0.1:19443/ 2>/dev/null'
+out=$($WSK dr-drill --max-rto 0 2>&1 | tail -1)
+assert "drill reports the measured RTO"                    'grep -q "full recovery in [0-9]*s" <<<"$out"'
+
 echo "== retention (GFS)"
 export WSK_DAILY_KEEP=3
 for i in 1 2 3 4 5; do sleep 1.1; $WSK backup >/dev/null 2>&1; done
@@ -89,7 +121,7 @@ if command -v logrotate >/dev/null; then
   assert "logrotate accepts the policy (logrotate -d, no syntax errors)" 'grep -q "reading config file" <<<"$lr" && ! grep -qiE "unknown option|bad |syntax|unexpected" <<<"$lr"'
 else echo "  skip logrotate -d (logrotate not installed here; CI runs it)"; fi
 tout=$($WSK timers)
-assert "timers cron file contains all 4 jobs"         '[[ $(grep -c " root " <<<"$tout") -eq 4 ]]'
+assert "timers cron file contains all 5 jobs"         '[[ $(grep -c " root " <<<"$tout") -eq 5 ]]'
 
 echo "== health when something breaks"
 "$T/nginx-wrap" -s stop; sleep 1
@@ -105,7 +137,7 @@ cp "$T/vhost.bak" "$WSK_NGINX_CONFD/$SITE.conf"
 
 echo "== scheduled jobs: guarded cron file, validation, overlap/timeout protection"
 $WSK timers --apply >/dev/null
-assert "timers --apply wrote a cron file with 4 guarded jobs"  '[[ $(grep -c " guard " "$WSK_CRON_FILE") == 4 ]] && grep -q "^MAILTO=" "$WSK_CRON_FILE"'
+assert "timers --apply wrote a cron file with 5 guarded jobs"  '[[ $(grep -c " guard " "$WSK_CRON_FILE") == 5 ]] && grep -q "^MAILTO=" "$WSK_CRON_FILE"'
 out=$($WSK timers --check); rc=$?
 assert "timers --check accepts the generated file"             '(( rc == 0 )) && grep -q "is valid" <<<"$out"'
 cp "$WSK_CRON_FILE" "$T/cron.bad"; sed -i 's|^30 2 \* \* \*|61 2 * * *|' "$T/cron.bad"; echo '0 1 * * * root /nonexistent/wsk backup' >> "$T/cron.bad"; echo '0 1 * * * nosuchuser '"$PWD/wsk"' backup' >> "$T/cron.bad"; echo '0 1 * * * root '"$PWD"'/wsk logs date +%F' >> "$T/cron.bad"

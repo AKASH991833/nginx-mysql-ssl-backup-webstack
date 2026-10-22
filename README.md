@@ -19,13 +19,15 @@ Everything is one readable Bash tool: `wsk`.
 | Feature | Why it matters |
 |---|---|
 | **Backups are verified by really restoring them** | `wsk verify` restores the dump into a scratch database and compares the row count of every table with the counts recorded at backup time. A backup you never restored is a hope, not a backup. A corrupted file is caught (checksum + gzip + restore). |
+| **Automated restore tests** | `wsk restore-test` re-proves the latest backup (media, database, complete archive extraction), reports drift against the live webroot, and fails when the backup is older than your RPO. JSON + text reports for cron and monitoring; a guarded nightly job is included in `wsk timers`. |
+| **A real disaster-recovery drill** | `wsk dr-drill` rebuilds every site from the latest backup into an isolated root, boots a private nginx on drill ports and probes it like a visitor (301, HTTPS 200, byte-identical content) - while the live site stays untouched. It prints the measured RTO and backup age, and `--max-rto` turns it into an RTO gate. |
 | **Grandfather-father-son retention with hard links** | Daily (7), weekly (4), monthly (6) copies, promoted with `cp -al`, so weekly/monthly cost almost no extra disk. |
 | **Off-site copy** | Optional `rsync` after every backup (`WSK_RSYNC_TARGET`). |
 | **One command per site** | `wsk init-site` creates the web root, certificate, nginx vhost (or an Apache vhost with `--server apache` - same hardening standard: TLS 1.2/1.3, headers, dotfile and leftover blocking), database, a *separate* DB user limited to that one database, and a 600-mode credentials file. The generated nginx config is tested with `nginx -t` before it is kept (and removed if invalid). |
 | **Secure by default** | TLS 1.2/1.3 only, HTTP to HTTPS redirect, version hidden, CSP/nosniff/X-Frame/Referrer/Permissions headers, rate limit, dotfiles and `.sql/.bak` blocked. |
 | **Attack-probe report** | `wsk logs` shows top IPs, status codes, 404 paths and which IPs probe for `wp-login`, `.env`, `phpmyadmin`, `.git`. |
 | **Certificate watchdog** | `wsk certs` lists days left; exit code 1 (renew soon) and 2 (critical) so cron/monitoring can alert. |
-| **Tested for real** | The test-suite starts a real nginx and a real MariaDB (no root, no Docker) and checks 34 behaviours. |
+| **Tested for real** | The test-suite starts a real nginx and a real MariaDB (no root, no Docker) and checks 66 behaviours, including a full DR drill. |
 
 > Preparing for an interview? Read [INTERVIEW.md](INTERVIEW.md) (60-second pitch, design choices, 10 Q&A).
 
@@ -39,8 +41,10 @@ sudo ./wsk init-site example.com --self-signed       # lab: self-signed cert
 # production: sudo ./wsk init-site example.com --letsencrypt you@example.com   (DNS must point here, port 80 open)
 sudo systemctl reload nginx
 sudo ./wsk backup && sudo ./wsk verify               # first backup + restore test
+sudo ./wsk restore-test                              # automated verification + RPO freshness
+sudo ./wsk dr-drill                                  # full recovery drill in an isolated root (live site untouched)
 sudo ./wsk health                                    # everything green?
-sudo ./wsk timers --apply                            # schedule backup, verify, certs, health
+sudo ./wsk timers --apply                            # schedule backup, verify, restore-test, certs, health
 sudo ./wsk logrotate                                 # log rotation policy
 ```
 ![init-site](docs/img/init-site.png)

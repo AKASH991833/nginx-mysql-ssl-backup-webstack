@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # wsk - Nginx + MariaDB/MySQL + TLS + verified backups + log rotation, in one tool
 set -uo pipefail
-WSK_VERSION="2.0.0"
+WSK_VERSION="2.1.0"
 
 # ---------- configuration (all overridable by environment, so tests can run unprivileged) ----------
 P=${WSK_PREFIX:-}                                   # path prefix; empty on a real server
@@ -19,6 +19,9 @@ MYSQLDUMP=${WSK_MYSQLDUMP:-mysqldump}
 DAILY_KEEP=${WSK_DAILY_KEEP:-7}; WEEKLY_KEEP=${WSK_WEEKLY_KEEP:-4}; MONTHLY_KEEP=${WSK_MONTHLY_KEEP:-6}
 RSYNC_TARGET=${WSK_RSYNC_TARGET:-}                  # e.g. backup@host:/srv/backups  or a local path
 CERT_WARN_DAYS=${WSK_CERT_WARN_DAYS:-21}; CERT_CRIT_DAYS=${WSK_CERT_CRIT_DAYS:-7}
+DR_HTTP_PORT=${WSK_DR_HTTP_PORT:-19080}; DR_HTTPS_PORT=${WSK_DR_HTTPS_PORT:-19443}  # ports of the isolated drill web server
+DR_ROOT=${WSK_DR_ROOT:-$P/var/lib/wsk/dr-drill}          # where drills rebuild the stack (never the live paths)
+REPORT_KEEP=${WSK_REPORT_KEEP:-14}                        # restore-test / dr-drill reports kept per command
 [[ -r $ETC/wsk.conf ]] && source "$ETC/wsk.conf"
 
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then R=$'\e[31m'; G=$'\e[32m'; Y=$'\e[33m'; B=$'\e[1m'; D=$'\e[2m'; N=$'\e[0m'; else R=""; G=""; Y=""; B=""; D=""; N=""; fi
@@ -290,6 +293,222 @@ cmd_restore() {
   tar -xzf "$dir/$site.files.tar.gz" -C "$(dirname "$WEBROOT")" "$(basename "$WEBROOT")" && ok "web files restored"
 }
 
+# ---------- restore-test & DR drill ---------------------------------------------------------
+_backup_age() { # dir -> seconds since backup creation (manifest timestamp, else newest file mtime; -1 unknown)
+  local d=$1 created epoch
+  if [[ -s $d/manifest.json ]]; then
+    created=$(sed -n 's/.*"created":"\([^"]*\)".*/\1/p' "$d/manifest.json" | head -1)
+    if epoch=$(date -u -d "$created" +%s 2>/dev/null) && [[ -n $epoch ]]; then echo $(( $(date -u +%s) - epoch )); return; fi
+  fi
+  epoch=$(find "$d" -type f -printf '%T@\n' 2>/dev/null | sort -n | tail -1 | cut -d. -f1)
+  if [[ -n $epoch ]]; then echo $(( $(date +%s) - epoch )); else echo -1; fi
+}
+
+_prune_reports() { # prefix - keep the newest REPORT_KEEP reports of one command
+  local pre=$1 n=0 x
+  for x in $(ls -1 "$ETC/reports/$pre"-*.json 2>/dev/null | sort -r); do n=$((n+1)); (( n > REPORT_KEEP )) && rm -f "$x" "${x%.json}.txt"; done
+}
+
+_restore_test_run() { # dir max_age - transcript on stdout, metrics to $DR_METRICS
+  local dir=$1 max_age=$2
+  local rt_fail=0 rt_warn=0 rt_drift=0
+  # 1. media + database proof: exactly the checks of `wsk verify`
+  local vout
+  if vout=$(cmd_verify "$dir" 2>&1); then ok "media + database restore proof passed (checksums, gzip, scratch-database row counts)"
+  else bad "database/media verification failed:"; printf '%s\n' "$vout"; rt_fail=$((rt_fail+1)); fi
+  # 2. every files archive must extract completely; then report drift against the live webroot
+  local f s x listed extracted webroot base d
+  for f in "$dir"/*.files.tar.gz; do
+    s=$(basename "$f" .files.tar.gz); x=$(mktemp -d)
+    listed=$(tar -tzf "$f" 2>/dev/null | grep -c /)
+    if tar -xzf "$f" -C "$x" 2>/dev/null; then
+      extracted=$(find "$x" -mindepth 1 | wc -l)
+      if [[ $listed == "$extracted" ]]; then ok "files archive for $s extracts completely ($extracted entries)"
+      else bad "files archive for $s: $listed entries listed but $extracted extracted"; rt_fail=$((rt_fail+1)); fi
+    else bad "files archive for $s failed to extract"; rt_fail=$((rt_fail+1)); fi
+    webroot=""; [[ -s $ETC/sites/$s.env ]] && webroot=$(sed -n 's/^WEBROOT=//p' "$ETC/sites/$s.env")
+    base=${webroot##*/}
+    if [[ -n $webroot && -d $x/$base && -d $webroot ]]; then
+      d=$(diff -r "$x/$base" "$webroot" 2>/dev/null | grep -c '^' || true); d=${d:-0}
+      if [[ $d == 0 ]]; then ok "no drift: live webroot of $s matches the backup"
+      else wrn "drift: $d line(s) differ between the backup and the live webroot of $s (the site changed since the backup)"; rt_warn=$((rt_warn+1)); rt_drift=$((rt_drift+d)); fi
+    elif [[ -n $webroot && ! -d $webroot ]]; then wrn "live webroot of $s is missing entirely (drift: everything)"; rt_warn=$((rt_warn+1)); fi
+    rm -rf "$x"
+  done
+  # 3. RPO freshness: an old backup restores fine and still fails the recovery objective
+  local age; age=$(_backup_age "$dir")
+  if (( age < 0 )); then wrn "backup age unknown (no manifest timestamp)"; rt_warn=$((rt_warn+1))
+  elif (( age > max_age )); then bad "newest backup is ${age}s old, older than the allowed ${max_age}s (RPO breach)"; rt_fail=$((rt_fail+1))
+  else ok "backup is fresh: ${age}s old (limit ${max_age}s)"; fi
+  printf 'fails=%s\nwarns=%s\ndrift=%s\nage=%s\n' "$rt_fail" "$rt_warn" "$rt_drift" "$age" > "$DR_METRICS"
+  (( rt_fail > 0 )) && return 1; return 0
+}
+
+cmd_restore_test() { # [BACKUP_DIR|latest] [--json] [--max-age SECONDS]
+  local dir=latest want_json=0 max_age=${WSK_RESTORE_TEST_MAX_AGE:-93600}
+  while (( $# )); do case $1 in
+    --json) want_json=1; shift;;
+    --max-age) max_age=${2:?--max-age needs seconds}; shift 2;;
+    -*) die "unknown option $1";;
+    *) dir=$1; shift;; esac; done
+  [[ $dir == latest ]] && dir=$(_latest); [[ -d $dir ]] || die "no backup found (run: wsk backup)"
+  note "restore-test: proving $dir restores (media, database, files, freshness)"
+  local t0 t1 m out rc=0 fails warns drift age result base
+  t0=$(date +%s); m=$(mktemp)
+  out=$(DR_METRICS=$m _restore_test_run "$dir" "$max_age") || rc=1
+  t1=$(date +%s)
+  fails=$(sed -n 's/^fails=//p' "$m"); warns=$(sed -n 's/^warns=//p' "$m"); drift=$(sed -n 's/^drift=//p' "$m"); age=$(sed -n 's/^age=//p' "$m"); rm -f "$m"
+  fails=${fails:-$rc}; warns=${warns:-0}; drift=${drift:-0}; age=${age:-0}
+  mkdir -p "$ETC/reports"; chmod 700 "$ETC/reports" 2>/dev/null || true
+  result=pass; (( fails > 0 )) && result=fail
+  base="$ETC/reports/restore-test-$t1"
+  { printf '%s\n' "$out"; printf '\nrestore-test %s - %s\n' "$result" "$(date -u -d "@$t1" '+%F %T UTC')"; } > "$base.txt"
+  printf '%s\n' "$out"
+  printf '{"tool":"wsk","version":"%s","command":"restore-test","backup":"%s","started":%s,"ended":%s,"duration_seconds":%s,"backup_age_seconds":%s,"max_age_seconds":%s,"failures":%s,"warnings":%s,"drifted_lines":%s,"result":"%s"}\n' \
+    "$WSK_VERSION" "$dir" "$t0" "$t1" "$((t1-t0))" "$age" "$max_age" "$fails" "$warns" "$drift" "$result" > "$base.json"
+  _prune_reports restore-test
+  if (( fails > 0 )); then
+    echo FAIL > "$ETC/last_restore_test"; bad "restore-test FAILED - $fails failure(s); report: $base.txt"
+    (( want_json )) && cat "$base.json"; return 1
+  fi
+  echo "OK $t1" > "$ETC/last_restore_test"; ok "restore-test PASSED (backup age ${age}s, drift ${drift} lines) - report: $base.txt"
+  (( want_json )) && cat "$base.json"; return 0
+}
+
+_dr_nginx_bin() {
+  if [[ -n ${WSK_DR_NGINX_BIN:-} ]]; then echo "$WSK_DR_NGINX_BIN"; return; fi
+  if command -v nginx >/dev/null 2>&1; then command -v nginx; return; fi
+  if [[ -x /usr/sbin/nginx ]]; then echo /usr/sbin/nginx; return; fi
+  return 1
+}
+
+_dr_drill_run() { # dir nginx_bin max_rto keep - transcript on stdout, metrics to $DR_METRICS
+  local dir=$1 nbin=$2 max_rto=$3 keep=$4
+  local t0 dr_fail=0 dr_dbs="" nnginx=0 rto=0
+  t0=$(date +%s)
+  local age; age=$(_backup_age "$dir")
+  local ts; ts=$(date +%s)
+  local dr="$DR_ROOT/$ts"
+  local sites; sites=$(_sites)
+  if [[ -z $sites ]]; then bad "no sites registered (run: wsk init-site)"; printf 'rto=0\nrpo=%s\nfails=1\n' "$age" > "$DR_METRICS"; return 1; fi
+  note "drill scenario: the server is lost. Recovering every site from $dir into the isolated root $dr"
+  note "  (the live site, live database and live nginx are untouched - the drill rebuilds a copy)"
+  mkdir -p "$dr/www" "$dr/conf.d" "$dr/logs" "$dr/nginx"
+  cp "$NGINX_CONFD/00-wsk-global.conf" "$dr/conf.d/" 2>/dev/null || true
+  local s vhost
+  for s in $sites; do
+    # shellcheck disable=SC1090
+    source "$(site_env "$s")"
+    # 1. database into a scratch database (never the live one)
+    if [[ -s $dir/$s.db.sql.gz ]]; then
+      local scratch="wsk_dr_${DB}_$$" diffs
+      if ! sql -e "CREATE DATABASE \`$scratch\`"; then bad "$s: cannot create scratch database"; dr_fail=$((dr_fail+1));
+      elif gunzip -c "$dir/$s.db.sql.gz" | sql "$scratch"; then
+        if diffs=$(diff <(_rowcounts "$scratch") "$dir/$s.rowcounts.tsv" 2>/dev/null); then ok "$s: database restored, all table row counts match"
+        else bad "$s: row counts differ after restore"; printf '%s\n' "$diffs"; dr_fail=$((dr_fail+1)); fi
+      else bad "$s: SQL restore failed"; dr_fail=$((dr_fail+1)); fi
+      dr_dbs+="$scratch "
+    else wrn "$s: no database dump in the backup (site created with --skip-db)"; fi
+    # 2. files from the backup archive
+    mkdir -p "$dr/www/$s"
+    if tar -xzf "$dir/$s.files.tar.gz" -C "$dr/www/$s" 2>/dev/null && [[ -d $dr/www/$s/${WEBROOT##*/} ]]; then
+      ok "$s: files restored ($(find "$dr/www/$s" -type f | wc -l) files)"
+    else bad "$s: file restore failed"; dr_fail=$((dr_fail+1)); continue; fi
+    # 3. vhost from the backup, rewritten to DR paths and DR ports (nginx sites only)
+    if [[ ${SERVER:-nginx} == apache ]]; then wrn "$s: apache site - the drill restores DB + files but does not start a DR apache (limitation)"; continue; fi
+    vhost="$dir/$s.nginx.conf"; [[ -s $vhost ]] || vhost="$NGINX_CONFD/$s.conf"
+    if [[ -s $vhost ]]; then
+      sed -e "s|listen $HTTP_PORT;|listen $DR_HTTP_PORT;|" \
+          -e "s|listen $HTTPS_PORT ssl;|listen $DR_HTTPS_PORT ssl;|" \
+          -e "s|\\\$host:$HTTPS_PORT|\\\$host:$DR_HTTPS_PORT|" \
+          -e "s|root $WEBROOT;|root $dr/www/$s/${WEBROOT##*/};|" \
+          -e "s|$LOG_DIR/|$dr/logs/|g" \
+          "$vhost" > "$dr/conf.d/$s.conf" || { bad "$s: could not render the DR vhost"; dr_fail=$((dr_fail+1)); continue; }
+      nnginx=$((nnginx+1))
+    else wrn "$s: no saved nginx vhost (skipped web serving check)"; fi
+  done
+  # 4. start the recovered stack as an isolated nginx and probe it like a visitor
+  if (( nnginx > 0 )); then
+    cat > "$dr/nginx/nginx.conf" <<C
+$( [[ $EUID -eq 0 ]] && echo "user root;" )
+worker_processes 1; pid $dr/nginx/nginx.pid; error_log $dr/nginx/error.log;
+events { worker_connections 64; }
+http {
+  types { text/html html; text/css css; }
+  client_body_temp_path $dr/nginx/t1; proxy_temp_path $dr/nginx/t2; fastcgi_temp_path $dr/nginx/t3; uwsgi_temp_path $dr/nginx/t4; scgi_temp_path $dr/nginx/t5;
+  access_log off;
+  include $dr/conf.d/*.conf;
+}
+C
+    local out
+    if out=$("$nbin" -p "$dr/nginx/" -c "$dr/nginx/nginx.conf" -t 2>&1); then ok "recovered nginx configuration valid (nginx -t)"
+    else bad "recovered nginx configuration invalid"; printf '%s\n' "$out"; dr_fail=$((dr_fail+1)); fi
+    if (( dr_fail == 0 )); then
+      if "$nbin" -p "$dr/nginx/" -c "$dr/nginx/nginx.conf" 2>>"$dr/logs/dr-nginx.log"; then
+        local i up=0
+        for i in $(seq 1 20); do curl -sk --max-time 2 -o /dev/null "https://127.0.0.1:$DR_HTTPS_PORT/" && { up=1; break; }; sleep 0.5; done
+        if (( ! up )); then bad "recovered nginx did not answer on port $DR_HTTPS_PORT"; dr_fail=$((dr_fail+1));
+        else
+          local s2 code rcode idx
+          for s2 in $sites; do
+            # shellcheck disable=SC1090
+            source "$(site_env "$s2")"
+            [[ ${SERVER:-nginx} == apache ]] && continue
+            rcode=$(curl -s --max-time 5 -o /dev/null -w "%{http_code}" --resolve "$s2:$DR_HTTP_PORT:127.0.0.1" "http://$s2:$DR_HTTP_PORT/" 2>/dev/null)
+            if [[ $rcode == 301 ]]; then ok "$s2: recovered http -> https redirect (301)"; else bad "$s2: recovered redirect returned $rcode"; dr_fail=$((dr_fail+1)); fi
+            code=$(curl -sk --max-time 5 -o "$dr/probe.html" -w "%{http_code}" --resolve "$s2:$DR_HTTPS_PORT:127.0.0.1" "https://$s2:$DR_HTTPS_PORT/" 2>/dev/null)
+            if [[ $code != 200 ]]; then bad "$s2: recovered https returned $code"; dr_fail=$((dr_fail+1));
+            else
+              idx="$dr/www/$s2/${WEBROOT##*/}/index.html"
+              if [[ -f $idx ]] && ! cmp -s "$dr/probe.html" "$idx"; then bad "$s2: recovered https 200 but served content differs from the restored files"; dr_fail=$((dr_fail+1))
+              else ok "$s2: recovered https answers 200, content matches the restored backup"; fi
+            fi
+          done
+        fi
+      else bad "recovered nginx failed to start (see $dr/logs/dr-nginx.log)"; dr_fail=$((dr_fail+1)); fi
+    fi
+  else wrn "no nginx site to serve - web recovery check skipped"; fi
+  rto=$(( $(date +%s) - t0 ))
+  if (( max_rto > 0 )); then
+    if (( rto > max_rto )); then bad "recovery took ${rto}s, over the RTO limit of ${max_rto}s"; dr_fail=$((dr_fail+1));
+    else ok "recovery time ${rto}s is within the RTO limit (${max_rto}s)"; fi
+  fi
+  # cleanup: stop the drill server, drop scratch databases, remove the drill root unless --keep
+  [[ -f $dr/nginx/nginx.pid ]] && kill "$(cat "$dr/nginx/nginx.pid")" 2>/dev/null
+  local d; for d in $dr_dbs; do sql -e "DROP DATABASE IF EXISTS \`$d\`" 2>/dev/null; done
+  if (( keep )); then note "drill root kept for inspection: $dr"; else sleep 1; rm -rf "$dr"; fi
+  printf 'rto=%s\nrpo=%s\nfails=%s\n' "$rto" "$age" "$dr_fail" > "$DR_METRICS"
+  (( dr_fail > 0 )) && return 1; return 0
+}
+
+cmd_dr_drill() { # [--keep] [--json] [--max-rto SECONDS]
+  local keep=0 want_json=0 max_rto=${WSK_DR_MAX_RTO:-0}
+  while (( $# )); do case $1 in
+    --keep) keep=1; shift;;
+    --json) want_json=1; shift;;
+    --max-rto) max_rto=${2:?--max-rto needs seconds}; shift 2;;
+    *) die "unknown option $1";; esac; done
+  local dir; dir=$(_latest); [[ -d $dir ]] || die "no backup found (run: wsk backup)"
+  local nbin; nbin=$(_dr_nginx_bin) || die "nginx binary not found (set WSK_DR_NGINX_BIN)"
+  local t0 t1 m out rc=0 fails rto age result base
+  t0=$(date +%s); m=$(mktemp)
+  out=$(DR_METRICS=$m _dr_drill_run "$dir" "$nbin" "$max_rto" "$keep") || rc=1
+  t1=$(date +%s)
+  rto=$(sed -n 's/^rto=//p' "$m"); age=$(sed -n 's/^rpo=//p' "$m"); fails=$(sed -n 's/^fails=//p' "$m"); rm -f "$m"
+  fails=${fails:-$rc}; rto=${rto:-0}; age=${age:-0}
+  mkdir -p "$ETC/reports"; chmod 700 "$ETC/reports" 2>/dev/null || true
+  result=pass; (( fails > 0 )) && result=fail
+  base="$ETC/reports/dr-drill-$t1"
+  { printf '%s\n' "$out"; printf '\ndr-drill %s - %s\n' "$result" "$(date -u -d "@$t1" '+%F %T UTC')"; } > "$base.txt"
+  printf '%s\n' "$out"
+  printf '{"tool":"wsk","version":"%s","command":"dr-drill","backup":"%s","started":%s,"ended":%s,"rto_seconds":%s,"backup_age_seconds":%s,"max_rto_seconds":%s,"failures":%s,"result":"%s"}\n' \
+    "$WSK_VERSION" "$dir" "$t0" "$t1" "$rto" "$age" "$max_rto" "$fails" "$result" > "$base.json"
+  _prune_reports dr-drill
+  if (( fails > 0 )); then bad "DR drill FAILED - $fails failure(s); report: $base.txt"; (( want_json )) && cat "$base.json"; return 1; fi
+  ok "DR drill PASSED - full recovery in ${rto}s from a ${age}s old backup; report: $base.txt"
+  (( want_json )) && cat "$base.json"; return 0
+}
+
 # ---------- certificates --------------------------------------------------------------------
 cert_days() { # file -> days left (negative if expired)
   local end; end=$(openssl x509 -enddate -noout -in "$1" 2>/dev/null | cut -d= -f2) || return 1
@@ -419,6 +638,7 @@ _timer_jobs() { # name|schedule|timeout|subcommand
   cat <<J
 backup|30 2 * * *|10800|backup
 verify|30 4 * * 0|7200|verify
+restore-test|30 3 * * *|3600|restore-test
 certs|0 6 * * *|900|certs
 health|*/5 * * * *|240|health
 J
@@ -522,6 +742,8 @@ wsk $WSK_VERSION - Nginx + MariaDB/MySQL + TLS + verified backups + log rotation
   wsk init-site DOMAIN [--self-signed | --letsencrypt EMAIL] [--db NAME] [--http-port N --https-port N] [--skip-db] [--server nginx|apache]
   wsk backup                               dump DBs + files, checksum, rotate daily/weekly/monthly, optional rsync off-site
   wsk verify [BACKUP_DIR|latest]           PROVE the backup restores (scratch database + row-count comparison)
+  wsk restore-test [BACKUP_DIR|latest] [--json] [--max-age S]   automated restore verification + drift + RPO freshness, writes JSON/text reports (cron-safe)
+  wsk dr-drill [--keep] [--json] [--max-rto S]   disaster-recovery drill: rebuild every site from the backup into an isolated root, boot a private nginx, probe https, measure RTO (live site untouched)
   wsk restore BACKUP_DIR SITE --yes        restore DB + files
   wsk certs [list|renew DOMAIN]            certificate expiry table (exit 1 warn, 2 critical)
   wsk logs [ACCESS_LOG]                    traffic + attack-probe report
@@ -534,7 +756,7 @@ U
 
 case ${1:-help} in
   install) shift; cmd_install "$@";; init-site) shift; cmd_init_site "$@";; backup) shift; cmd_backup "$@";;
-  verify) shift; cmd_verify "$@";; restore) shift; cmd_restore "$@";; certs) shift; cmd_certs "$@";;
+  verify) shift; cmd_verify "$@";; restore-test) shift; cmd_restore_test "$@";; dr-drill) shift; cmd_dr_drill "$@";; restore) shift; cmd_restore "$@";; certs) shift; cmd_certs "$@";;
   logs) shift; cmd_logs "$@";; logrotate) shift; cmd_logrotate "$@";; health) shift; cmd_health "$@";; timers) shift; cmd_timers "$@";; guard) shift; cmd_guard "$@";;
   version|--version) echo "wsk $WSK_VERSION";; *) cmd_help;;
 esac
