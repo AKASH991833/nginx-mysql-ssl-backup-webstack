@@ -22,6 +22,7 @@ $CLI -S "$T/s.sock" -uroot -e 'select 1' >/dev/null 2>&1 || { echo "MariaDB did 
 # ---- nginx wrapper using a private prefix ----
 mkdir -p "$T/nginx/conf.d" "$T/nginx/logs" "$T/log"
 cat > "$T/nginx/nginx.conf" <<C
+$( [[ $EUID -eq 0 ]] && echo "user root;" )
 worker_processes 1; pid $T/nginx/nginx.pid; error_log $T/nginx/logs/error.log;
 events { worker_connections 64; }
 http {

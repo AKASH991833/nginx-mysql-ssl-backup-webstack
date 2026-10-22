@@ -21,7 +21,6 @@ assert "vhost has TLS1.2+1.3 only"                    'grep -q "ssl_protocols TL
 sleep 1
 H="--resolve $SITE:18080:127.0.0.1 --resolve $SITE:18443:127.0.0.1"
 assert "HTTP redirects to HTTPS (301)"                '[[ $(curl -s -o /dev/null -w "%{http_code}" $H http://$SITE:18080/) == 301 ]]'
-code=$(curl -sk -o /dev/null -w "%{http_code}" $H https://$SITE:18443/); echo "DEBUG rocky: GET / -> $code"; curl -skv $H https://$SITE:18443/ 2>&1 | tail -5
 assert "HTTPS serves the page (200)"                  '[[ $(curl -sk -o /dev/null -w "%{http_code}" $H https://$SITE:18443/) == 200 ]]'
 hdr=$(curl -skI $H https://$SITE:18443/ | tr -d "\r")
 assert "security headers present"                     'grep -qi "x-content-type-options: nosniff" <<<"$hdr" && grep -qi "content-security-policy" <<<"$hdr"'
