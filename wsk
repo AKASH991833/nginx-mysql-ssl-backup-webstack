@@ -317,14 +317,15 @@ _restore_test_run() { # dir max_age - transcript on stdout, metrics to $DR_METRI
   if vout=$(cmd_verify "$dir" 2>&1); then ok "media + database restore proof passed (checksums, gzip, scratch-database row counts)"
   else bad "database/media verification failed:"; printf '%s\n' "$vout"; rt_fail=$((rt_fail+1)); fi
   # 2. every files archive must extract completely; then report drift against the live webroot
-  local f s x listed extracted webroot base d
+  local f s x webroot base d
   for f in "$dir"/*.files.tar.gz; do
     s=$(basename "$f" .files.tar.gz); x=$(mktemp -d)
-    listed=$(tar -tzf "$f" 2>/dev/null | grep -c /)
     if tar -xzf "$f" -C "$x" 2>/dev/null; then
-      extracted=$(find "$x" -mindepth 1 | wc -l)
-      if [[ $listed == "$extracted" ]]; then ok "files archive for $s extracts completely ($extracted entries)"
-      else bad "files archive for $s: $listed entries listed but $extracted extracted"; rt_fail=$((rt_fail+1)); fi
+      # every entry the archive lists must exist afterwards (tar omits intermediate dirs, so count entries, not files)
+      local missing=0 e
+      while IFS= read -r e; do [[ -e $x/$e ]] || missing=$((missing+1)); done < <(tar -tzf "$f" 2>/dev/null)
+      if (( missing == 0 )); then ok "files archive for $s extracts completely ($(tar -tzf "$f" 2>/dev/null | grep -c /) entries)"
+      else bad "files archive for $s: $missing entries failed to extract"; rt_fail=$((rt_fail+1)); fi
     else bad "files archive for $s failed to extract"; rt_fail=$((rt_fail+1)); fi
     webroot=""; [[ -s $ETC/sites/$s.env ]] && webroot=$(sed -n 's/^WEBROOT=//p' "$ETC/sites/$s.env")
     base=${webroot##*/}
