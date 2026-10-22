@@ -4,6 +4,14 @@
 ### Added
 - Debian CI matrix: the full real-nginx + real-MariaDB integration suite on Debian 12
   (bookworm) and Debian 13 (trixie) with apt packages.
+- Apache support: `wsk init-site --server apache` provisions a hardened Apache vhost
+  (TLS 1.2/1.3, security headers, version hidden, dotfile/dot-directory and .sql/.bak
+  blocking, ACME challenge path) gated on configtest; backup captures the Apache vhost;
+  health checks whichever server each site uses. New `apache` CI matrix runs a dedicated
+  scenario suite on Debian 12, Debian 13, Rocky 9 and Ubuntu 24.04. Rate limiting remains
+  nginx-only (documented).
+- Broken-config drill in both suites: a hand-broken vhost makes `wsk health` exit 2; it
+  passes again after repair.
 
 ## [1.1.0] - 2026-10-22
 ### Added

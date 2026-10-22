@@ -4,7 +4,7 @@
 [![release](https://img.shields.io/github/v/release/AKASH991833/nginx-mysql-ssl-backup-webstack)](https://github.com/AKASH991833/nginx-mysql-ssl-backup-webstack/releases)
 ![bash](https://img.shields.io/badge/language-bash-4EAA25) ![tested on](https://img.shields.io/badge/tested%20on-ubuntu%20%2B%20debian%2012%2F13%20%2B%205x%20RHEL--family%20%2B%20docker-blue) ![nginx](https://img.shields.io/badge/nginx-1.18%2B-009639) ![license](https://img.shields.io/badge/license-MIT-blue)
 
-A production-style web server stack you can build in one command and *understand* from zero: **Nginx** (hardened, HTTPS, security headers, rate limiting) + **MariaDB/MySQL** (least-privilege user per site) + **TLS** (Let's Encrypt or self-signed lab certs) + **automatic backups that are proven restorable** + **log rotation and log analysis** + an end-to-end **health check**.
+A production-style web server stack you can build in one command and *understand* from zero: **Nginx or Apache** (hardened, HTTPS, security headers, rate limiting) + **MariaDB/MySQL** (least-privilege user per site) + **TLS** (Let's Encrypt or self-signed lab certs) + **automatic backups that are proven restorable** + **log rotation and log analysis** + an end-to-end **health check**.
 
 Everything is one readable Bash tool: `wsk`.
 
@@ -21,7 +21,7 @@ Everything is one readable Bash tool: `wsk`.
 | **Backups are verified by really restoring them** | `wsk verify` restores the dump into a scratch database and compares the row count of every table with the counts recorded at backup time. A backup you never restored is a hope, not a backup. A corrupted file is caught (checksum + gzip + restore). |
 | **Grandfather-father-son retention with hard links** | Daily (7), weekly (4), monthly (6) copies, promoted with `cp -al`, so weekly/monthly cost almost no extra disk. |
 | **Off-site copy** | Optional `rsync` after every backup (`WSK_RSYNC_TARGET`). |
-| **One command per site** | `wsk init-site` creates the web root, certificate, nginx vhost, database, a *separate* DB user limited to that one database, and a 600-mode credentials file. The generated nginx config is tested with `nginx -t` before it is kept (and removed if invalid). |
+| **One command per site** | `wsk init-site` creates the web root, certificate, nginx vhost (or an Apache vhost with `--server apache` - same hardening standard: TLS 1.2/1.3, headers, dotfile and leftover blocking), database, a *separate* DB user limited to that one database, and a 600-mode credentials file. The generated nginx config is tested with `nginx -t` before it is kept (and removed if invalid). |
 | **Secure by default** | TLS 1.2/1.3 only, HTTP to HTTPS redirect, version hidden, CSP/nosniff/X-Frame/Referrer/Permissions headers, rate limit, dotfiles and `.sql/.bak` blocked. |
 | **Attack-probe report** | `wsk logs` shows top IPs, status codes, 404 paths and which IPs probe for `wp-login`, `.env`, `phpmyadmin`, `.git`. |
 | **Certificate watchdog** | `wsk certs` lists days left; exit code 1 (renew soon) and 2 (critical) so cron/monitoring can alert. |
@@ -126,6 +126,8 @@ Environment variables (`WSK_*`) let you relocate every path, so you can also run
 - **CI result (Oct 22, 2026):** `lint-and-test` and `real-server` are green. The real-server run found and fixed a real bug (a second `gzip on` clashed with the distro nginx.conf) and a logrotate check that was too strict on the CI runner.
 - The `rhel-family` CI matrix runs the same full integration suite (real nginx + real MariaDB) on Rocky 9, AlmaLinux 9, CentOS Stream 9 and Fedora (latest), all with dnf packages. Red Hat UBI 9 is deliberately excluded here: its free repos ship the MariaDB client but no `mariadb-server` package, so the suite cannot run there without a RHEL subscription (the other two projects in this profile do run their suites on UBI 9).
 - The `debian` CI matrix runs the same full integration suite (real nginx + real MariaDB) on Debian 12 (bookworm) and Debian 13 (trixie), both with apt packages.
+- **Apache verified:** the `apache` CI matrix runs a dedicated scenario suite (real httpd + real MariaDB: init-site, configtest gating, redirect, HTTPS, headers, version hidden, dotfile/dot-directory and .sql blocking, TLS 1.1 refusal, ACME challenge path, backup capturing the vhost, health, and a broken-config drill) on Debian 12, Debian 13, Rocky 9 and Ubuntu 24.04. Apache mode covers vhost provisioning + health; rate limiting stays nginx-only (honest gap).
+- The suites also drill real failure scenarios: a corrupted backup (checksum catches it), disaster restore after table loss, an expiring certificate (CRITICAL + renew), a down web server (health exits 2), and a hand-broken vhost config (health catches it, then passes after repair).
 
 ## Security notes
 Never commit `/etc/wsk` (it holds DB credentials). Keep `wsk-backups` off the web root. Use SSH-key login for `WSK_RSYNC_TARGET`. Test `wsk restore` on a staging machine before you need it.

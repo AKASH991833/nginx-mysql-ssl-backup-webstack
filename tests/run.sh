@@ -96,5 +96,12 @@ echo "== health when something breaks"
 out=$($WSK health 2>&1); rc=$?
 assert "health reports FAIL (exit 2) when nginx is down" '(( rc == 2 )) && grep -q "https returned" <<<"$out"'
 
+echo "== broken-config drill"
+cp "$WSK_NGINX_CONFD/$SITE.conf" "$T/vhost.bak"
+echo "this is not valid nginx config ;;;" >> "$WSK_NGINX_CONFD/$SITE.conf"
+out=$($WSK health 2>&1); rc=$?
+assert "health FAILS (exit 2) on a broken nginx vhost"  '(( rc == 2 )) && grep -q "nginx -t" <<<"$out"'
+cp "$T/vhost.bak" "$WSK_NGINX_CONFD/$SITE.conf"
+
 echo; echo "passed: $PASS   failed: $FAIL"
 (( FAIL == 0 ))

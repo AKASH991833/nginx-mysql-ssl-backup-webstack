@@ -12,6 +12,8 @@ BACKUP_DIR=${WSK_BACKUP_DIR:-$P/var/backups/wsk}
 LOG_DIR=${WSK_LOG_DIR:-$P/var/log/nginx}
 NGINX_BIN=${WSK_NGINX_BIN:-nginx}
 NGINX_CONF=${WSK_NGINX_CONF:-}                      # main nginx.conf (only needed when not the default one)
+SERVER=${WSK_SERVER:-nginx}                           # nginx (default) or apache
+APACHE_CONFD=${WSK_APACHE_CONFD:-$P/etc/apache2/conf-enabled}
 MYSQL=${WSK_MYSQL:-mysql}                           # e.g. "mariadb -S /run/mysqld/mysqld.sock -uroot"
 MYSQLDUMP=${WSK_MYSQLDUMP:-mysqldump}
 DAILY_KEEP=${WSK_DAILY_KEEP:-7}; WEEKLY_KEEP=${WSK_WEEKLY_KEEP:-4}; MONTHLY_KEEP=${WSK_MONTHLY_KEEP:-6}
@@ -26,6 +28,10 @@ ok()   { printf ' %s[ OK ]%s %s\n' "$G" "$N" "$*"; }
 bad()  { printf ' %s[FAIL]%s %s\n' "$R" "$N" "$*"; }
 wrn()  { printf ' %s[WARN]%s %s\n' "$Y" "$N" "$*"; }
 nginx_t() { if [[ -n $NGINX_CONF ]]; then "$NGINX_BIN" -t -c "$NGINX_CONF" 2>&1; else "$NGINX_BIN" -t 2>&1; fi; }
+apache_t() { # config test for the apache side; WSK_APACHE_T overrides the whole command (tests use a private instance)
+  if [[ -n ${WSK_APACHE_T:-} ]]; then $WSK_APACHE_T 2>&1; return; fi
+  if command -v apache2ctl >/dev/null 2>&1; then apache2ctl configtest 2>&1; else apachectl configtest 2>&1; fi
+}
 sql()  { $MYSQL "$@"; }            # intentionally unquoted: MYSQL may hold several words
 site_env() { echo "$ETC/sites/$1.env"; }
 rand_pw() { openssl rand -base64 33 | tr -dc 'A-Za-z0-9' | head -c 24; }
@@ -56,20 +62,80 @@ log_format wsk '$remote_addr - $remote_user [$time_local] "$request" $status $bo
 G
 }
 
+write_apache_global() {
+  mkdir -p "$APACHE_CONFD"
+  cat > "$APACHE_CONFD/00-wsk-global.conf" <<'G'
+# managed by wsk - global hardening for every site (apache)
+ServerTokens Prod                       # do not advertise the apache version
+ServerSignature Off
+# same field layout as the nginx "wsk" format, so `wsk logs` parses both
+LogFormat "%h %l %u %t \"%r\" %>s %b \"%{Referer}i\" \"%{User-Agent}i\" rt=%T" wsk
+G
+}
+
+write_apache_vhost() { # domain db root cdir http_port https_port
+  local domain=$1 db=$2 root=$3 cdir=$4 hp=$5 sp=$6
+  local target="https://$domain/"; [[ $sp != 443 ]] && target="https://$domain:$sp/"
+  cat > "$APACHE_CONFD/$domain.conf" <<V
+# managed by wsk - $domain
+Listen $hp
+Listen $sp
+
+<VirtualHost *:$hp>
+    ServerName $domain
+    Alias /.well-known/acme-challenge/ "$root/.well-known/acme-challenge/"
+    RedirectMatch permanent ^/(?!\.well-known/acme-challenge) $target
+</VirtualHost>
+
+<VirtualHost *:$sp>
+    ServerName $domain
+    DocumentRoot "$root"
+
+    SSLEngine on
+    SSLProtocol -all +TLSv1.2 +TLSv1.3
+    SSLHonorCipherOrder off
+    SSLSessionTickets off
+    SSLCertificateFile $cdir/fullchain.pem
+    SSLCertificateKeyFile $cdir/privkey.pem
+
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set X-Frame-Options "SAMEORIGIN"
+    Header always set Referrer-Policy "strict-origin-when-cross-origin"
+    Header always set Content-Security-Policy "default-src 'self'"
+    Header always set Permissions-Policy "geolocation=(), camera=(), microphone=()"
+
+    <Directory "$root">
+        Require all granted
+        Options -Indexes
+    </Directory>
+    RewriteEngine on
+    RewriteRule "(^|/)\.(?!well-known)" - [F]          # .git, .env, .htaccess ...
+    <FilesMatch "\.(sql|bak|old|swp)$">
+        Require all denied                              # leftovers
+    </FilesMatch>
+
+    CustomLog "$LOG_DIR/$domain.access.log" wsk
+    ErrorLog "$LOG_DIR/$domain.error.log"
+</VirtualHost>
+V
+}
+
 cmd_init_site() {
   local domain=${1:-}; shift || true
   [[ $domain =~ ^[a-zA-Z0-9.-]+$ ]] || die "usage: wsk init-site DOMAIN [--db NAME] [--self-signed | --letsencrypt EMAIL] [--http-port N] [--https-port N] [--skip-db]"
   local db=${domain//[.-]/_}; local mode=self-signed email="" hp=80 sp=443 skipdb=0
   while (( $# )); do case $1 in
     --db) db=$2; shift 2;; --self-signed) mode=self-signed; shift;; --letsencrypt) mode=letsencrypt; email=$2; shift 2;;
-    --http-port) hp=$2; shift 2;; --https-port) sp=$2; shift 2;; --skip-db) skipdb=1; shift;; *) die "unknown option $1";; esac; done
+    --http-port) hp=$2; shift 2;; --https-port) sp=$2; shift 2;; --skip-db) skipdb=1; shift;;
+    --server) SERVER=$2; shift 2;; *) die "unknown option $1";; esac; done
+  [[ $SERVER == nginx || $SERVER == apache ]] || die "--server must be nginx or apache"
   local root="$WEBROOT_BASE/$domain/public" cdir="$ETC/certs/$domain"
   mkdir -p "$root" "$cdir" "$ETC/sites" "$LOG_DIR"; chmod 700 "$ETC"
-  write_global_snippet
+  if [[ $SERVER == apache ]]; then write_apache_global; else write_global_snippet; fi
 
   # 1. sample page
   [[ -e $root/index.html ]] || cat > "$root/index.html" <<H
-<!doctype html><title>$domain</title><h1>$domain is live</h1><p>Served by nginx, configured by wsk.</p>
+<!doctype html><title>$domain</title><h1>$domain is live</h1><p>Served by $SERVER, configured by wsk.</p>
 H
 
   # 2. certificate
@@ -84,7 +150,10 @@ H
     ok "Let's Encrypt certificate issued"
   fi
 
-  # 3. nginx vhost
+  # 3. vhost (nginx or apache)
+  if [[ $SERVER == apache ]]; then
+    write_apache_vhost "$domain" "$db" "$root" "$cdir" "$hp" "$sp"
+  else
   local redir_port=""; [[ $sp != 443 ]] && redir_port=":$sp"
   local hsts=""; [[ $mode == letsencrypt ]] && hsts='add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;'
   cat > "$NGINX_CONFD/$domain.conf" <<V
@@ -127,6 +196,7 @@ server {
     location ~* \.(sql|bak|old|swp)$ { deny all; }        # leftovers
 }
 V
+  fi
 
   # 4. database + least-privilege user
   local dbpass=""
@@ -140,9 +210,14 @@ V
     umask 077; printf '[client]\nuser=%s_app\npassword=%s\ndatabase=%s\n' "$db" "$dbpass" "$db" > "$ETC/sites/$domain.my.cnf"; umask 022
     ok "database '$db' + user '${db}_app' (only that database). Credentials: $ETC/sites/$domain.my.cnf (mode 600)"
   fi
-  printf 'DOMAIN=%s\nDB=%s\nWEBROOT=%s\nHTTP_PORT=%s\nHTTPS_PORT=%s\nCERT_MODE=%s\n' "$domain" "$db" "$root" "$hp" "$sp" "$mode" > "$(site_env "$domain")"
-  local out; if out=$(nginx_t); then ok "nginx config test passed"; else bad "nginx -t failed"; echo "$out"; rm -f "$NGINX_CONFD/$domain.conf"; exit 1; fi
-  note "Reload nginx to go live:  sudo systemctl reload nginx"
+  printf 'DOMAIN=%s\nDB=%s\nWEBROOT=%s\nHTTP_PORT=%s\nHTTPS_PORT=%s\nCERT_MODE=%s\nSERVER=%s\n' "$domain" "$db" "$root" "$hp" "$sp" "$mode" "$SERVER" > "$(site_env "$domain")"
+  if [[ $SERVER == apache ]]; then
+    local out; if out=$(apache_t); then ok "apache configtest passed"; else bad "apache configtest failed"; echo "$out"; rm -f "$APACHE_CONFD/$domain.conf"; exit 1; fi
+    note "Reload apache to go live:  sudo systemctl reload apache2   (Debian/Ubuntu)  or  sudo systemctl reload httpd   (RHEL family)"
+  else
+    local out; if out=$(nginx_t); then ok "nginx config test passed"; else bad "nginx -t failed"; echo "$out"; rm -f "$NGINX_CONFD/$domain.conf"; exit 1; fi
+    note "Reload nginx to go live:  sudo systemctl reload nginx"
+  fi
 }
 
 # ---------- backups ---------------------------------------------------------------------------
@@ -164,7 +239,8 @@ cmd_backup() {
       $MYSQLDUMP --single-transaction --routines --triggers --events "$DB" | gzip -9 > "$dest/$s.db.sql.gz" || exit 1
       tar -czf "$dest/$s.files.tar.gz" -C "$(dirname "$WEBROOT")" "$(basename "$WEBROOT")" -C "$ETC/.." "$(basename "$ETC")/sites/$s.env" 2>/dev/null \
         || tar -czf "$dest/$s.files.tar.gz" -C "$(dirname "$WEBROOT")" "$(basename "$WEBROOT")"
-      cp "$NGINX_CONFD/$s.conf" "$dest/$s.nginx.conf" 2>/dev/null || true
+      if [[ ${SERVER:-nginx} == apache ]]; then cp "$APACHE_CONFD/$s.conf" "$dest/$s.apache.conf" 2>/dev/null || true
+      else cp "$NGINX_CONFD/$s.conf" "$dest/$s.nginx.conf" 2>/dev/null || true; fi
       _rowcounts "$DB" > "$dest/$s.rowcounts.tsv" ) || { rm -rf "$dest"; die "backup of $s failed"; }
   done
   ( cd "$dest" && sha256sum ./*.gz ./*.tsv > SHA256SUMS )
@@ -226,7 +302,7 @@ cmd_certs() {
     # shellcheck disable=SC1090
     source "$(site_env "$d")"
     if [[ $CERT_MODE == letsencrypt ]]; then certbot renew --cert-name "$d" && ok "renewed via certbot (reload nginx)"
-    else rm -f "$ETC/certs/$d/fullchain.pem"; ok "self-signed regenerated"; cmd_init_site "$d" --db "$DB" --skip-db --http-port "$HTTP_PORT" --https-port "$HTTPS_PORT" >/dev/null; fi
+    else rm -f "$ETC/certs/$d/fullchain.pem"; ok "self-signed regenerated"; cmd_init_site "$d" --db "$DB" --skip-db --http-port "$HTTP_PORT" --https-port "$HTTPS_PORT" --server "${SERVER:-nginx}" >/dev/null; fi
     return
   fi
   printf '%s%-28s %-12s %6s  %s%s\n' "$B" DOMAIN TYPE DAYS STATE "$N"
@@ -284,7 +360,15 @@ L
 # ---------- health -------------------------------------------------------------------------------
 cmd_health() {
   local fail=0 warn=0 s json=0; [[ ${1:-} == --json ]] && json=1
-  local out; if out=$(nginx_t); then ok "nginx configuration valid"; else bad "nginx -t: $out"; fail=1; fi
+  local servers; servers=$(for s in $(_sites); do ( source "$(site_env "$s")"; echo "${SERVER:-nginx}" ); done | sort -u); servers=${servers:-nginx}
+  local srv
+  for srv in $servers; do
+    if [[ $srv == apache ]]; then
+      local out; if out=$(apache_t); then ok "apache configtest passed"; else bad "apache configtest failed: $out"; fail=1; fi
+    else
+      local out; if out=$(nginx_t); then ok "nginx configuration valid"; else bad "nginx -t: $out"; fail=1; fi
+    fi
+  done
   if sql -e "SELECT 1" >/dev/null 2>&1; then ok "database answers"; else bad "database not reachable"; fail=1; fi
   for s in $(_sites); do
     # shellcheck disable=SC1090
@@ -295,7 +379,7 @@ cmd_health() {
     [[ $code == 200 ]] && ok "$s: https answers 200" || { bad "$s: https returned $code"; fail=1; }
     local hdr; hdr=$(curl -skI -m 8 --resolve "$s:$HTTPS_PORT:127.0.0.1" "https://$s:$HTTPS_PORT/" | tr -d '\r')
     grep -qi '^x-content-type-options: nosniff' <<<"$hdr" && ok "$s: security headers present" || { wrn "$s: security headers missing"; warn=1; }
-    grep -qi '^server: nginx/' <<<"$hdr" && { wrn "$s: nginx version is exposed"; warn=1; }
+    grep -qiE '^server: (nginx|apache)/' <<<"$hdr" && { wrn "$s: web server version is exposed"; warn=1; }
     local days; days=$(cert_days "$ETC/certs/$s/fullchain.pem") || days=""
     if [[ -z $days ]]; then bad "$s: certificate unreadable"; fail=1
     elif (( days < CERT_CRIT_DAYS )); then bad "$s: certificate expires in $days days"; fail=1
@@ -326,7 +410,7 @@ cmd_help() { cat <<U
 wsk $WSK_VERSION - Nginx + MariaDB/MySQL + TLS + verified backups + log rotation
 
   wsk install                              install nginx, mariadb, certbot, rsync, logrotate (apt/dnf, root)
-  wsk init-site DOMAIN [--self-signed | --letsencrypt EMAIL] [--db NAME] [--http-port N --https-port N] [--skip-db]
+  wsk init-site DOMAIN [--self-signed | --letsencrypt EMAIL] [--db NAME] [--http-port N --https-port N] [--skip-db] [--server nginx|apache]
   wsk backup                               dump DBs + files, checksum, rotate daily/weekly/monthly, optional rsync off-site
   wsk verify [BACKUP_DIR|latest]           PROVE the backup restores (scratch database + row-count comparison)
   wsk restore BACKUP_DIR SITE --yes        restore DB + files
